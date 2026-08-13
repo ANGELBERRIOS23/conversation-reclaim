@@ -1,1 +1,2 @@
 pyinstaller==6.21.0
+PySide6-Essentials==6.10.1

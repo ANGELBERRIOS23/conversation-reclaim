@@ -77,12 +77,16 @@ CLI Python sin dependencias externas.
 
 ## Interfaz visual
 
-Usar `gui.py` como capa delgada sobre las funciones auditadas de `reclaim.py`.
+Usar `desktop.py` (Qt 6) como interfaz principal y `gui.py` (Tk) únicamente
+como fallback para código fuente sin PySide6. Ambas son capas delgadas sobre
+las funciones auditadas de `reclaim.py`.
 Mostrar estimación, recomendación, explicación y estado activo por categoría;
 marcar por defecto solo elementos recomendados con tamaño mayor que cero. Dejar
 que el usuario desmarque categorías, elija respaldo y confirme el conjunto
 exacto antes de aplicar. Mantener toda operación de disco en el motor común para
 que CLI y GUI compartan las mismas protecciones y manifiestos.
+La interfaz principal debe ser responsive, tener scroll con barra de acción
+siempre visible, Español/English persistente y respetar el estilo del sistema.
 
 En Windows, detectar archivos abiertos mediante la API nativa de file sharing.
 El cierre automático de OpenCode es solo macOS; pedir cierre manual en Windows.

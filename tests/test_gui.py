@@ -1,3 +1,4 @@
+import ast
 import io
 import plistlib
 import tempfile
@@ -45,6 +46,21 @@ class GuiScanTests(unittest.TestCase):
              mock.patch.object(gui.tk, "Tk") as tk_root:
             self.assertEqual(gui.main(["--smoke-test"]), 0)
         tk_root.assert_not_called()
+
+    def test_desktop_translations_have_matching_keys(self):
+        source = (Path(__file__).resolve().parents[1] / "desktop.py").read_text(
+            encoding="utf-8")
+        module = ast.parse(source)
+        assignment = next(
+            node for node in module.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "STRINGS"
+                    for target in node.targets)
+        )
+        translations = ast.literal_eval(assignment.value)
+        self.assertEqual(set(translations), {"es", "en"})
+        self.assertEqual(set(translations["es"]), set(translations["en"]))
+        self.assertIn("continue", translations["es"])
 
 
 class GuiApplyTests(unittest.TestCase):

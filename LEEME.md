@@ -44,7 +44,9 @@ Tres formas de usarla:
    agente *"libera espacio de mis conversaciones"* (o en inglés; la herramienta
    habla el idioma en el que le hables). La skill conoce los marcadores, las
    reglas de seguridad y el flujo revisión-primero. Así la usa el autor.
-2. **Interfaz visual** — ejecuta `python3 reclaim.py gui` en macOS/Linux o
+2. **Interfaz visual** — la app portable usa Qt 6 con una interfaz moderna y
+   adaptable para macOS/Windows, más selector Español/English que recuerda la
+   preferencia. Ejecuta `python3 reclaim.py gui` en macOS/Linux o
    `py reclaim.py gui` en Windows. El panel mide cada categoría, marca lo
    recomendado, explica qué conserva, permite desmarcar lo que quieras, ofrece
    respaldo externo y confirma antes de escribir. Desde el código fuente, en
@@ -65,7 +67,8 @@ pueden ofrecer tres descargas autocontenidas generadas por GitHub Actions:
 - **macOS Apple Silicon:** descomprime el paquete `macOS-arm64` y abre la app.
 - **macOS Intel:** descomprime el paquete `macOS-x64` y abre la app.
 
-Esos paquetes ya incluyen Python y Tk: el usuario no instala nada. Los launchers
+Esos paquetes ya incluyen su propio runtime de Python y Qt 6: el usuario no
+instala Python ni ninguna dependencia. Los launchers
 del código fuente quedan para quienes ya tengan Python. Un build de desarrollo
 sin certificado puede requerir **clic derecho → Abrir** en macOS o confirmar
 Windows SmartScreen. Cada tag `v*` crea los tres paquetes y los adjunta al

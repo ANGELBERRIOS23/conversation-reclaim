@@ -40,7 +40,7 @@ from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home()
-VERSION = "2.3.1"
+VERSION = "2.4.0"
 MANIFEST_DIR = HOME / ".conversation-reclaim"
 
 # ---------------------------------------------------------------------------
@@ -1615,7 +1615,13 @@ def main(argv=None):
         restore(args.backup_dir or str(HOME / "respaldos-ia"))
         return 0
     elif args.mode == "gui":
-        from gui import main as gui_main
+        try:
+            from desktop import main as gui_main
+        except ModuleNotFoundError as exc:
+            if exc.name != "PySide6":
+                raise
+            print("PySide6 no está instalado; se abrirá la interfaz clásica de respaldo.")
+            from gui import main as gui_main
         return gui_main()
     return 0
 

@@ -20,6 +20,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile
-        run: python -m py_compile reclaim.py gui.py tests/test_reclaim.py tests/test_gui.py
+        run: python -m py_compile reclaim.py gui.py desktop.py packaging/build.py tests/test_reclaim.py tests/test_gui.py
       - name: Test
         run: python -m unittest discover -v

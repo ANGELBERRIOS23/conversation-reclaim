@@ -51,6 +51,8 @@ def scan_categories():
             "recommended": True,
             "detail": "Compactaciones y sidechains cerrados; conserva resumen, reciente y memory.",
             "note": f"{claude.get('subagents_n', 0)} subagentes cerrados",
+            "note_es": f"{claude.get('subagents_n', 0)} subagentes cerrados",
+            "note_en": f"{claude.get('subagents_n', 0)} closed subagents",
             "error": claude_error,
         },
         {
@@ -62,6 +64,10 @@ def scan_categories():
             "detail": "Sesiones compactadas, hijos cerrados y caches; omite esta tarea y archivos activos.",
             "note": (f"{codex.get('subagents_n', 0)} cerrados · "
                      f"{codex.get('active_subagents', 0)} activos protegidos"),
+            "note_es": (f"{codex.get('subagents_n', 0)} cerrados · "
+                        f"{codex.get('active_subagents', 0)} activos protegidos"),
+            "note_en": (f"{codex.get('subagents_n', 0)} closed · "
+                        f"{codex.get('active_subagents', 0)} active and protected"),
             "error": codex_error,
         },
         {
@@ -71,6 +77,8 @@ def scan_categories():
             "recommended": True,
             "detail": "Snapshots locales, tool-output y logs reconstruibles.",
             "note": "No modifica opencode.db",
+            "note_es": "No modifica opencode.db",
+            "note_en": "Does not modify opencode.db",
             "error": None,
         },
         {
@@ -81,6 +89,8 @@ def scan_categories():
             "recommended": True,
             "detail": "Eventos de streaming redundantes y mensajes anteriores a compactación.",
             "note": "Requiere OpenCode cerrado; puede cerrarlo con aviso en macOS",
+            "note_es": "Requiere OpenCode cerrado; puede cerrarlo con aviso en macOS",
+            "note_en": "Requires OpenCode to be closed; macOS can quit it after warning",
             "error": opencode_error,
         },
         {
@@ -92,6 +102,10 @@ def scan_categories():
             "detail": "Compactaciones, scratch, caches, logs y capturas browser ya consumidas.",
             "note": (f"{antigravity.get('compacted', 0)} conversaciones compactadas · "
                      f"recordings {reclaim.human(antigravity.get('recordings', 0))}"),
+            "note_es": (f"{antigravity.get('compacted', 0)} conversaciones compactadas · "
+                        f"capturas {reclaim.human(antigravity.get('recordings', 0))}"),
+            "note_en": (f"{antigravity.get('compacted', 0)} compacted conversations · "
+                        f"recordings {reclaim.human(antigravity.get('recordings', 0))}"),
             "error": antigravity_error,
         },
     ]

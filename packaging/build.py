@@ -34,7 +34,7 @@ def main():
             "--osx-bundle-identifier",
             "com.angelberrios.conversation-reclaim",
         ])
-    args.append("gui.py")
+    args.append("desktop.py")
     subprocess.run(args, cwd=ROOT, check=True)
     return 0
 
