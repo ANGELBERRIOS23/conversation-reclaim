@@ -1,3 +1,4 @@
+use crate::harnesses::registered_harnesses;
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -12,6 +13,10 @@ use walkdir::WalkDir;
 #[serde(rename_all = "camelCase")]
 pub struct Category {
     key: String,
+    name: String,
+    description_es: String,
+    description_en: String,
+    logo: String,
     bytes: u64,
     items: u64,
     recommended: bool,
@@ -47,7 +52,7 @@ pub struct ApplyResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Action {
+pub(crate) struct Action {
     category: String,
     action: String,
     path: PathBuf,
@@ -56,11 +61,24 @@ struct Action {
     reason: String,
 }
 
+impl Action {
+    pub(crate) fn delete(category: &str, path: PathBuf, bytes: u64, reason: &str) -> Self {
+        Self {
+            category: category.into(),
+            action: "delete_file".into(),
+            path,
+            planned_bytes: bytes,
+            marker_offset: None,
+            reason: reason.into(),
+        }
+    }
+}
+
 fn home() -> Result<PathBuf, String> {
     dirs::home_dir().ok_or_else(|| "Could not determine the user home folder".to_string())
 }
 
-fn file_size(path: &Path) -> u64 {
+pub(crate) fn file_size(path: &Path) -> u64 {
     fs::symlink_metadata(path)
         .ok()
         .filter(|m| m.file_type().is_file())
@@ -68,7 +86,7 @@ fn file_size(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn collect_files(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn collect_files(root: &Path) -> Vec<PathBuf> {
     if !root.exists() {
         return Vec::new();
     }
@@ -139,18 +157,6 @@ fn marker_offset(path: &Path, predicate: fn(&Value) -> bool) -> Result<Option<u6
     Ok(last)
 }
 
-fn claude_marker(value: &Value) -> bool {
-    value.get("type").and_then(Value::as_str) == Some("summary")
-        || value.get("isSummary").and_then(Value::as_bool) == Some(true)
-        || value.get("compactMetadata").is_some_and(Value::is_object)
-        || (value.get("type").and_then(Value::as_str) == Some("system")
-            && value.get("subtype").and_then(Value::as_str) == Some("compact_boundary"))
-}
-
-fn codex_marker(value: &Value) -> bool {
-    value.get("type").and_then(Value::as_str) == Some("compacted")
-}
-
 fn is_codex_subagent(path: &Path) -> bool {
     let Ok(file) = File::open(path) else {
         return true;
@@ -172,7 +178,7 @@ fn is_codex_subagent(path: &Path) -> bool {
     false
 }
 
-fn claude_sidechain_valid(path: &Path) -> bool {
+pub(crate) fn claude_sidechain_valid(path: &Path) -> bool {
     if path
         .parent()
         .and_then(Path::file_name)
@@ -219,7 +225,7 @@ fn claude_sidechain_valid(path: &Path) -> bool {
     found
 }
 
-fn add_trim_actions(
+pub(crate) fn add_trim_actions(
     actions: &mut Vec<Action>,
     root: &Path,
     category: &str,
@@ -256,7 +262,12 @@ fn add_trim_actions(
     }
 }
 
-fn add_tree_actions(actions: &mut Vec<Action>, root: &Path, category: &str, reason: &str) {
+pub(crate) fn add_tree_actions(
+    actions: &mut Vec<Action>,
+    root: &Path,
+    category: &str,
+    reason: &str,
+) {
     for path in collect_files(root) {
         let size = file_size(&path);
         if size > 0 {
@@ -272,101 +283,40 @@ fn add_tree_actions(actions: &mut Vec<Action>, root: &Path, category: &str, reas
     }
 }
 
-fn build_plan() -> Result<(Vec<Action>, Vec<String>), String> {
+fn build_plan() -> Result<(Vec<Action>, Vec<String>, Vec<PathBuf>), String> {
     let user_home = home()?;
     let mut actions = Vec::new();
     let mut warnings = Vec::new();
-
-    let claude = user_home.join(".claude/projects");
-    add_trim_actions(&mut actions, &claude, "claude", claude_marker, false);
-    for path in collect_files(&claude) {
-        if path.extension().and_then(|s| s.to_str()) == Some("jsonl")
-            && claude_sidechain_valid(&path)
-        {
-            actions.push(Action {
-                category: "claude".into(),
-                action: "delete_file".into(),
-                planned_bytes: file_size(&path),
-                marker_offset: None,
-                path,
-                reason: "validated closed Claude sidechain".into(),
-            });
-        }
+    let harnesses = registered_harnesses();
+    let allowed_roots = harnesses
+        .iter()
+        .flat_map(|h| h.allowed_roots(&user_home))
+        .collect();
+    for harness in harnesses {
+        harness.plan(&user_home, &mut actions, &mut warnings);
     }
-
-    let codex = user_home.join(".codex");
-    add_trim_actions(
-        &mut actions,
-        &codex.join("sessions"),
-        "codex",
-        codex_marker,
-        true,
-    );
-    add_trim_actions(
-        &mut actions,
-        &codex.join("archived_sessions"),
-        "codex",
-        codex_marker,
-        true,
-    );
-    add_tree_actions(
-        &mut actions,
-        &codex.join("cache"),
-        "codex",
-        "regenerable Codex cache",
-    );
-    warnings.push("Active and child Codex sessions are excluded from native cleanup".into());
-
-    let opencode = if cfg!(target_os = "windows") {
-        dirs::data_local_dir()
-            .unwrap_or_else(|| user_home.clone())
-            .join("opencode")
-    } else {
-        user_home.join(".local/share/opencode")
-    };
-    for leaf in ["snapshot", "tool-output", "log"] {
-        add_tree_actions(
-            &mut actions,
-            &opencode.join(leaf),
-            "opencode",
-            "regenerable OpenCode temporary data",
-        );
-    }
-    warnings.push("OpenCode conversation databases are protected in the native app".into());
-
-    let gemini = user_home.join(".gemini");
-    for leaf in [
-        "antigravity/scratch",
-        "antigravity-cli/scratch",
-        "antigravity-ide/scratch",
-        "antigravity-ide/browser_recordings",
-    ] {
-        add_tree_actions(
-            &mut actions,
-            &gemini.join(leaf),
-            "antigravity",
-            "one-use Antigravity artifact",
-        );
-    }
-    Ok((actions, warnings))
+    Ok((actions, warnings, allowed_roots))
 }
 
 pub fn scan_storage() -> Result<ScanResult, String> {
-    let (actions, warnings) = build_plan()?;
+    let (actions, warnings, _) = build_plan()?;
     let mut categories = Vec::new();
-    for (key, recommended) in [
-        ("claude", true),
-        ("codex", true),
-        ("opencode", false),
-        ("antigravity", true),
-    ] {
-        let matching: Vec<_> = actions.iter().filter(|a| a.category == key).collect();
+    for harness in registered_harnesses() {
+        let metadata = harness.metadata();
+        let matching: Vec<_> = actions
+            .iter()
+            .filter(|a| a.category == metadata.key)
+            .collect();
         categories.push(Category {
-            key: key.into(),
+            key: metadata.key.into(),
+            name: metadata.name.into(),
+            description_es: metadata.description_es.into(),
+            description_en: metadata.description_en.into(),
+            logo: metadata.logo.into(),
             bytes: matching.iter().map(|a| a.planned_bytes).sum(),
             items: matching.len() as u64,
-            recommended,
-            protected: true,
+            recommended: metadata.recommended,
+            protected: metadata.protected,
             available: true,
             details: Vec::new(),
         });
@@ -418,7 +368,14 @@ pub fn apply_cleanup(request: ApplyRequest) -> Result<ApplyResult, String> {
     if chosen.is_empty() {
         return Err("No cleanup categories were selected".into());
     }
-    let (plan, mut warnings) = build_plan()?;
+    let registered: HashSet<_> = registered_harnesses()
+        .into_iter()
+        .map(|h| h.metadata().key.to_string())
+        .collect();
+    if let Some(unknown) = chosen.iter().find(|key| !registered.contains(*key)) {
+        return Err(format!("Unknown cleanup category: {unknown}"));
+    }
+    let (plan, mut warnings, allowed) = build_plan()?;
     let selected: Vec<_> = plan
         .into_iter()
         .filter(|a| chosen.contains(&a.category))
@@ -435,22 +392,9 @@ pub fn apply_cleanup(request: ApplyRequest) -> Result<ApplyResult, String> {
         .write(true)
         .open(&manifest_path)
         .map_err(|e| e.to_string())?;
-    writeln!(manifest, "{}", json!({"type":"plan","version":"3.0.0","createdAt":Local::now().to_rfc3339(),"actions":selected})).map_err(|e| e.to_string())?;
+    writeln!(manifest, "{}", json!({"type":"plan","version":"3.0.1","createdAt":Local::now().to_rfc3339(),"actions":selected})).map_err(|e| e.to_string())?;
     manifest.sync_all().map_err(|e| e.to_string())?;
 
-    let opencode_root = if cfg!(target_os = "windows") {
-        dirs::data_local_dir()
-            .unwrap_or_else(|| user_home.clone())
-            .join("opencode")
-    } else {
-        user_home.join(".local/share/opencode")
-    };
-    let allowed = vec![
-        user_home.join(".claude"),
-        user_home.join(".codex"),
-        user_home.join(".gemini"),
-        opencode_root,
-    ];
     let mut freed = 0u64;
     let mut applied = 0usize;
     let mut skipped = 0usize;
@@ -524,16 +468,4 @@ pub fn reveal_manifest(path: &str) -> Result<(), String> {
             Err("Could not reveal manifest".into())
         }
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn structural_markers_ignore_nested_text() {
-        assert!(codex_marker(&json!({"type":"compacted"})));
-        assert!(!codex_marker(&json!({"payload":{"type":"compacted"}})));
-        assert!(!claude_marker(&json!({"message":"compact_boundary"})));
-    }
 }

@@ -1,16 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  Bot, Check, ChevronDown, CircleHelp, Database, ExternalLink,
+  Check, ChevronDown, CircleHelp, ExternalLink,
   FileClock, FolderCog, Globe2, HardDrive, Info, Languages,
   LoaderCircle, LockKeyhole, RefreshCw, ShieldCheck, Sparkles, Trash2,
 } from "lucide-react";
+import { BrandLogo } from "./BrandLogos";
 
 type Language = "es" | "en";
-type CategoryKey = "claude" | "codex" | "opencode" | "antigravity";
+type CategoryKey = string;
 
 type Category = {
   key: CategoryKey;
+  name: string;
+  descriptionEs: string;
+  descriptionEn: string;
+  logo: string;
   bytes: number;
   items: number;
   recommended: boolean;
@@ -65,8 +70,8 @@ const copy = {
     resultBody: "La limpieza terminó correctamente.",
     manifest: "Mostrar manifiesto",
     close: "Listo",
-    safetyTitle: "Diseñado para no romper nada",
-    safetyBody: "Los archivos abiertos, enlaces simbólicos y bases de datos activas se omiten automáticamente.",
+    safetyTitle: "Tus conversaciones están protegidas",
+    safetyBody: "La limpieza conserva las conversaciones activas y omite automáticamente cualquier archivo que esté en uso.",
     native: "App nativa · Sin Python",
     advanced: "Limpieza avanzada",
     advancedBody: "La poda profunda de bases de datos permanece disponible en el CLI para usuarios técnicos.",
@@ -103,8 +108,8 @@ const copy = {
     resultBody: "Cleanup completed successfully.",
     manifest: "Show manifest",
     close: "Done",
-    safetyTitle: "Designed to avoid breakage",
-    safetyBody: "Open files, symbolic links, and active databases are skipped automatically.",
+    safetyTitle: "Your conversations stay protected",
+    safetyBody: "Cleanup preserves active conversations and automatically skips anything currently in use.",
     native: "Native app · No Python",
     advanced: "Advanced cleanup",
     advancedBody: "Deep database pruning remains available in the CLI for technical users.",
@@ -113,30 +118,15 @@ const copy = {
   },
 };
 
-const categoryCopy = {
-  es: {
-    claude: ["Claude Code", "Historial compactado y subagentes cerrados"],
-    codex: ["Codex", "Cachés y sesiones compactadas inactivas"],
-    opencode: ["OpenCode", "Archivos temporales, registros y snapshots"],
-    antigravity: ["Antigravity", "Grabaciones del navegador y datos temporales"],
-  },
-  en: {
-    claude: ["Claude Code", "Compacted history and closed subagents"],
-    codex: ["Codex", "Caches and inactive compacted sessions"],
-    opencode: ["OpenCode", "Temporary files, logs, and snapshots"],
-    antigravity: ["Antigravity", "Browser recordings and temporary data"],
-  },
-};
-
 const demoScan: ScanResult = {
   totalReclaimable: 4_472_446_976,
   scannedAt: new Date().toISOString(),
   warnings: [],
   categories: [
-    { key: "claude", bytes: 894_435_328, items: 61, recommended: true, protected: true, available: true, details: [] },
-    { key: "codex", bytes: 341_835_776, items: 34, recommended: true, protected: true, available: true, details: [] },
-    { key: "opencode", bytes: 2_351_480_832, items: 418, recommended: false, protected: true, available: true, details: [] },
-    { key: "antigravity", bytes: 884_695_040, items: 182, recommended: true, protected: true, available: true, details: [] },
+    { key: "claude", name: "Claude Code", descriptionEs: "Historial compactado y subagentes cerrados", descriptionEn: "Compacted history and closed subagents", logo: "claude", bytes: 894_435_328, items: 61, recommended: true, protected: true, available: true, details: [] },
+    { key: "codex", name: "Codex", descriptionEs: "Cachés y sesiones compactadas inactivas", descriptionEn: "Caches and inactive compacted sessions", logo: "codex", bytes: 341_835_776, items: 34, recommended: true, protected: true, available: true, details: [] },
+    { key: "opencode", name: "OpenCode", descriptionEs: "Archivos temporales, registros y snapshots", descriptionEn: "Temporary files, logs, and snapshots", logo: "opencode", bytes: 2_351_480_832, items: 418, recommended: false, protected: true, available: true, details: [] },
+    { key: "antigravity", name: "Antigravity", descriptionEs: "Grabaciones del navegador y datos temporales", descriptionEn: "Browser recordings and temporary data", logo: "gemini", bytes: 884_695_040, items: 182, recommended: true, protected: true, available: true, details: [] },
   ],
 };
 
@@ -151,8 +141,6 @@ function formatBytes(bytes: number) {
 function isTauri() {
   return "__TAURI_INTERNALS__" in window;
 }
-
-const categoryIcons = { claude: Sparkles, codex: Bot, opencode: Database, antigravity: FolderCog };
 
 export default function App() {
   const [lang, setLang] = useState<Language>(() => (localStorage.getItem("reclaim-language") as Language) || "es");
@@ -250,13 +238,12 @@ export default function App() {
 
           <section className="category-grid">
             {(scan?.categories ?? []).map((category) => {
-              const Icon = categoryIcons[category.key];
-              const label = categoryCopy[lang][category.key];
+              const description = lang === "es" ? category.descriptionEs : category.descriptionEn;
               const checked = selected.has(category.key);
               return <button key={category.key} className={`category-card ${checked ? "selected" : ""}`} onClick={() => category.available && toggle(category.key)} disabled={!category.available} aria-pressed={checked}>
-                <div className="card-top"><span className={`tool-icon ${category.key}`}><Icon size={21} /></span><span className={`toggle ${checked ? "on" : ""}`}><span /></span></div>
-                <div className="card-title"><h3>{label[0]}</h3><span className={category.recommended ? "badge recommended" : "badge"}>{category.recommended ? t.recommended : t.optional}</span></div>
-                <p>{label[1]}</p>
+                <div className="card-top"><span className={`tool-icon ${category.logo}`}><BrandLogo logo={category.logo} size={21} /></span><span className={`toggle ${checked ? "on" : ""}`}><span /></span></div>
+                <div className="card-title"><h3>{category.name}</h3><span className={category.recommended ? "badge recommended" : "badge"}>{category.recommended ? t.recommended : t.optional}</span></div>
+                <p>{description}</p>
                 <div className="card-metric"><strong>{category.available ? formatBytes(category.bytes) : t.noData}</strong><span>{category.items} {t.items}</span></div>
                 {category.protected && <div className="protected"><LockKeyhole size={13} />{t.protected}</div>}
               </button>;

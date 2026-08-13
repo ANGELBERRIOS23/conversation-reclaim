@@ -196,6 +196,12 @@ This project wants to cover **every AI coding harness**, not just the current
 ones. Contributions for **Cursor, Kiro, Ghost, Trae, the DeepSeek harnesses,
 or anything else** are welcome — including a harness you are building yourself.
 
+The native app uses a discoverable `Harness` registry: each integration owns
+its metadata, permitted roots, scan rules, and cleanup plan in one module.
+The dashboard and executor discover registered integrations automatically and
+show a neutral fallback logo when no brand asset exists. See the concise
+[adding a harness guide](docs/ADDING_A_HARNESS.md).
+
 PR checklist (so the maintainers can trust and verify it):
 
 1. **State the OS you tested on** (e.g. "tested on Windows 11 Pro 24H2",

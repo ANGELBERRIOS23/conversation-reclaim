@@ -1,4 +1,5 @@
 mod engine;
+mod harnesses;
 
 use engine::{ApplyRequest, ApplyResult, ScanResult};
 

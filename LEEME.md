@@ -201,6 +201,12 @@ Son bienvenidas las contribuciones para **Cursor, Kiro, Ghost, Trae, los
 harness de DeepSeek o cualquier otro** — incluido un harness que estés
 construyendo tú mismo.
 
+La app nativa usa un registro `Harness`: cada integración mantiene en un solo
+módulo sus metadatos, raíces permitidas, reglas de escaneo y plan de limpieza.
+El panel y el ejecutor descubren las integraciones registradas automáticamente
+y muestran un símbolo neutral si aún no existe un logo. Consulta la
+[guía para añadir un harness](docs/ADDING_A_HARNESS.md).
+
 Checklist para el PR (para que los mantenedores puedan confiar y verificar):
 
 1. **Indica el SO donde probaste** (p. ej. "probado en Windows 11 Pro 24H2",
