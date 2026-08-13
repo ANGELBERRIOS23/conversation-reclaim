@@ -1,6 +1,6 @@
 import type { ReactElement } from "react";
 import { SiClaude, SiGooglegemini } from "@icons-pack/react-simple-icons";
-import { Boxes } from "lucide-react";
+import { Boxes, Image as ImageIcon } from "lucide-react";
 
 type LogoProps = { size?: number; className?: string };
 
@@ -10,6 +10,10 @@ export function ClaudeLogo({ size = 22, className }: LogoProps) {
 
 export function GeminiLogo({ size = 22, className }: LogoProps) {
   return <SiGooglegemini title="Google Gemini" size={size} className={className} />;
+}
+
+export function MediaLogo({ size = 22, className }: LogoProps) {
+  return <ImageIcon aria-label="Temporary media" size={size} className={className} />;
 }
 
 export function OpenCodeLogo({ size = 22, className }: LogoProps) {
@@ -30,6 +34,7 @@ const logos: Record<string, (props: LogoProps) => ReactElement> = {
   codex: CodexLogo,
   opencode: OpenCodeLogo,
   gemini: GeminiLogo,
+  media: MediaLogo,
 };
 
 export function BrandLogo({ logo, ...props }: LogoProps & { logo: string }) {

@@ -90,6 +90,8 @@ python3 reclaim.py scan                    # estimación de solo lectura
 python3 reclaim.py apply                   # aplica; escribe manifiesto en ~/.conversation-reclaim/
 python3 reclaim.py apply --backup-dir /Volumes/DISCO/respaldos-ia   # respaldo completo opcional
 python3 reclaim.py apply --only antigravity   # solo una herramienta
+python3 reclaim.py apply --only media         # solo adjuntos temporales antiguos (opcional)
+python3 reclaim.py apply --include-media      # incluir adjuntos temporales en una limpieza completa
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO   # poda opencode.db (opencode cerrado; respaldo obligatorio o --no-backup)
 python3 reclaim.py apply-db --no-backup --close-opencode  # avisa, cierra OpenCode normalmente y poda
 python3 reclaim.py skills                  # lista skills y detecta repetidas
@@ -117,6 +119,7 @@ Pídele en español y responde en español; en inglés, en inglés.
 | **OpenCode** | `~/.local/share/opencode/opencode.db` | part `type=compaction` con `tail_start_id` | `apply-db`: eventos de streaming redundantes + mensajes pre-compactación + VACUUM |
 | **OpenCode (archivos)** | `snapshot/`, `tool-output/`, `log/` | — | todos los snapshots locales, tool-outputs y logs |
 | **Antigravity / Gemini** | `~/.gemini/antigravity{,,-cli,-ide}/conversations/*.db` | pasos `step_type 98` (CONVERSATION_HISTORY) | poda pasos pre-compactación + transcripts, scratch, logs, caches, `browser_recordings` |
+| **Medios temporales (opcional)** | temporales del sistema `codex-clipboard-*` y `tempmediaStorage` de Antigravity | más de 7 días, archivo regular y cerrado | borra solo imágenes temporales identificadas estructuralmente; una vista previa antigua puede desaparecer |
 | **Command Code** | `~/.commandcode/projects/` | ninguno detectado | solo escaneo/respaldo |
 
 ## El problema del opencode.db (opencode-db-prune, integrado)
@@ -156,6 +159,12 @@ esos eventos redundantes, luego poda los mensajes pre-compactación y hace
 - Antes de borrar transcripts de subagentes o `browser_recordings`, el CLI
   muestra cantidad y tamaño. Las grabaciones son capturas ya consumidas que
   Antigravity no reutiliza.
+- Los medios temporales están separados y **desmarcados por defecto**.
+  `--only media` o `--include-media` elimina únicamente archivos antiguos
+  `codex-clipboard-*` e imágenes dentro de las carpetas temporales explícitas
+  de Antigravity. Conserva archivos de menos de siete días, abiertos, symlinks
+  e imágenes en carpetas normales de proyectos/brain. Una conversación antigua
+  puede perder su vista previa local después de esta limpieza.
 - Se puede limpiar desde Codex: la tarea actual, rollouts bloqueados y DB de
   logs activas se omiten; los historiales cerrados sí se limpian. Una ejecución
   posterior puede recuperar la tarea actual una vez cerrada.
@@ -163,6 +172,16 @@ esos eventos redundantes, luego poda los mensajes pre-compactación y hace
   deduplicar con symlinks).
 - Los caches (tool-output, logs, snapshots, scratch) son seguros de borrar —
   el prompt caching vive en el servidor, no cuesta tokens.
+
+### Reportes locales de uso y facturación
+
+La limpieza nunca modifica la facturación del proveedor, cargos de API, uso de
+la suscripción, facturas ni registros remotos de la cuenta. Sin embargo,
+herramientas como [ccusage](https://github.com/ccusage/ccusage) calculan sus
+reportes históricos a partir de logs locales de los agentes. Recortar un
+transcript o eliminar una sesión antigua puede hacer que los totales históricos
+locales y el detalle por sesión queden más bajos o incompletos. Exporta el
+reporte de ccusage a JSON antes de limpiar si ese historial local te importa.
 
 ## Notas de Windows: cómo encontrar qué limpiar
 

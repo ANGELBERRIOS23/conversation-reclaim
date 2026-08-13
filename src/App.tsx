@@ -105,6 +105,7 @@ const copy = {
     updateAvailable: "Nueva versión disponible",
     installUpdate: "Instalar y reiniciar",
     installingUpdate: "Instalando…",
+    temporaryMedia: "Medios temporales",
   },
   en: {
     product: "Conversation Reclaim",
@@ -164,6 +165,7 @@ const copy = {
     updateAvailable: "New version available",
     installUpdate: "Install and restart",
     installingUpdate: "Installing…",
+    temporaryMedia: "Temporary media",
   },
 };
 
@@ -176,6 +178,7 @@ const demoScan: ScanResult = {
     { key: "codex", name: "Codex", descriptionEs: "Cachés y sesiones compactadas inactivas", descriptionEn: "Caches and inactive compacted sessions", logo: "codex", bytes: 341_835_776, items: 34, recommended: true, protected: true, available: true, details: [] },
     { key: "opencode", name: "OpenCode", descriptionEs: "Archivos temporales, registros y snapshots", descriptionEn: "Temporary files, logs, and snapshots", logo: "opencode", bytes: 2_351_480_832, items: 418, recommended: false, protected: true, available: true, details: [] },
     { key: "antigravity", name: "Antigravity", descriptionEs: "Grabaciones del navegador y datos temporales", descriptionEn: "Browser recordings and temporary data", logo: "gemini", bytes: 884_695_040, items: 182, recommended: true, protected: true, available: true, details: [] },
+    { key: "media", name: "Temporary media", descriptionEs: "Adjuntos temporales antiguos; las vistas previas pueden desaparecer", descriptionEn: "Old temporary attachments; previews may disappear", logo: "media", bytes: 487_587_840, items: 3603, recommended: false, protected: true, available: true, details: [] },
   ],
 };
 
@@ -345,10 +348,11 @@ export default function App() {
             <section className="category-grid">
               {(scan?.categories ?? []).map((category) => {
                 const description = lang === "es" ? category.descriptionEs : category.descriptionEn;
+                const categoryName = category.key === "media" ? t.temporaryMedia : category.name;
                 const checked = selected.has(category.key);
                 return <button key={category.key} className={`category-card ${checked ? "selected" : ""}`} onClick={() => category.available && toggle(category.key)} disabled={!category.available} aria-pressed={checked}>
                   <div className="card-top"><span className={`tool-icon ${category.logo}`}><BrandLogo logo={category.logo} size={21} /></span><span className={`toggle ${checked ? "on" : ""}`}><span /></span></div>
-                  <div className="card-title"><h3>{category.name}</h3><span className={category.recommended ? "badge recommended" : "badge"}>{category.recommended ? t.recommended : t.optional}</span></div>
+                  <div className="card-title"><h3>{categoryName}</h3><span className={category.recommended ? "badge recommended" : "badge"}>{category.recommended ? t.recommended : t.optional}</span></div>
                   <p>{description}</p>
                   <div className="card-metric"><strong>{category.available ? formatBytes(category.bytes) : t.noData}</strong><span>{category.items} {t.items}</span></div>
                   {category.protected && <div className="protected"><LockKeyhole size={13} />{t.protected}</div>}

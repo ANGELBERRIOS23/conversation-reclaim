@@ -1,6 +1,7 @@
 mod antigravity;
 mod claude;
 mod codex;
+mod media;
 mod opencode;
 
 use crate::engine::Action;
@@ -34,6 +35,7 @@ pub fn registered_harnesses() -> Vec<Box<dyn Harness>> {
     vec![
         Box::new(claude::Claude),
         Box::new(codex::Codex),
+        Box::new(media::TemporaryMedia),
         Box::new(opencode::OpenCode),
         Box::new(antigravity::Antigravity),
     ]

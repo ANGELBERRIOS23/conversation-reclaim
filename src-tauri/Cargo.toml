@@ -1,6 +1,6 @@
 [package]
 name = "conversation-reclaim"
-version = "3.1.0"
+version = "3.2.0"
 description = "Safely reclaim space used by AI conversation tools"
 authors = ["Angel Berrios <angel@aberrios.com>"]
 edition = "2021"

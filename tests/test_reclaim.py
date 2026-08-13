@@ -165,6 +165,8 @@ class MetricsTests(unittest.TestCase):
              mock.patch.object(reclaim, "scan_codex", return_value=None), \
              mock.patch.object(reclaim, "scan_opencode", return_value=None), \
              mock.patch.object(reclaim, "scan_antigravity", return_value=fake), \
+             mock.patch.object(reclaim, "scan_transient_media",
+                               return_value={"files": [], "n": 0, "total": 0}), \
              mock.patch.object(reclaim, "dir_size", return_value=0), \
              mock.patch.object(reclaim, "scan_skills",
                                return_value={"n": 0, "total": 0, "dupes": []}):
@@ -179,6 +181,8 @@ class MetricsTests(unittest.TestCase):
              mock.patch.object(reclaim, "scan_codex", return_value=None), \
              mock.patch.object(reclaim, "scan_opencode", return_value=None), \
              mock.patch.object(reclaim, "scan_antigravity", return_value=None), \
+             mock.patch.object(reclaim, "scan_transient_media",
+                               return_value={"files": [], "n": 0, "total": 0}), \
              mock.patch.object(reclaim, "dir_size", return_value=0), \
              mock.patch.object(reclaim, "scan_skills",
                                return_value={"n": 2, "total": 20,
@@ -187,6 +191,58 @@ class MetricsTests(unittest.TestCase):
             with redirect_stdout(output):
                 reclaim.scan()
         self.assertIn("demo", output.getvalue())
+
+
+class TemporaryMediaTests(unittest.TestCase):
+    def test_discovers_only_old_structural_temporary_images(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            temp = root / "temp"
+            temp.mkdir()
+            old_codex = temp / "codex-clipboard-old.png"
+            recent_codex = temp / "codex-clipboard-recent.png"
+            unrelated = temp / "other.png"
+            for path in (old_codex, recent_codex, unrelated):
+                path.write_bytes(b"image")
+
+            gemini = root / "gemini"
+            media = gemini / "antigravity" / "brain" / "task" / ".tempmediaStorage" / "frame.webp"
+            deliverable = gemini / "antigravity" / "brain" / "task" / "deliverables" / "result.png"
+            media.parent.mkdir(parents=True)
+            deliverable.parent.mkdir(parents=True)
+            media.write_bytes(b"temp")
+            deliverable.write_bytes(b"keep")
+
+            now = 2_000_000_000
+            old = now - reclaim.TRANSIENT_MEDIA_MIN_AGE - 1
+            for path in (old_codex, unrelated, media, deliverable):
+                os.utime(path, (old, old))
+            os.utime(recent_codex, (now, now))
+            paths = dict(reclaim.PATHS)
+            paths["gemini"] = gemini
+            with mock.patch.object(reclaim, "PATHS", paths), \
+                 mock.patch.object(reclaim.tempfile, "gettempdir", return_value=str(temp)):
+                found = reclaim.transient_media_candidates(reference_time=now)
+            self.assertEqual(set(found), {old_codex, media})
+
+    def test_optional_apply_removes_old_media_and_records_manifest(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            old_media = root / "codex-clipboard-old.png"
+            old_media.write_bytes(b"image")
+            args = argparse.Namespace(backup_dir=None, only="media",
+                                      include_media=False,
+                                      no_antigravity_steps=False)
+            with mock.patch.object(reclaim, "transient_media_candidates",
+                                   return_value=[old_media]), \
+                 mock.patch.object(reclaim, "database_in_use", return_value=False), \
+                 mock.patch.object(reclaim, "MANIFEST_DIR", root / "manifests"), \
+                 redirect_stdout(io.StringIO()):
+                self.assertEqual(reclaim.apply(args), 0)
+            self.assertFalse(old_media.exists())
+            manifest = next((root / "manifests").glob("manifest-*.jsonl"))
+            record = json.loads(manifest.read_text().splitlines()[0])
+            self.assertEqual(record["action"], "delete_temporary_attachment")
 
 
 class ManifestTests(unittest.TestCase):

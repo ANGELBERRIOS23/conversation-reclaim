@@ -38,7 +38,7 @@ these destructive categories first; a full external backup is optional.
 
 | macOS | Windows 10/11 |
 |---|---|
-| ![Conversation Reclaim demo on macOS](docs/screenshots/macos-demo.png) | ![Conversation Reclaim preview on Windows](docs/screenshots/windows-demo.png) |
+| ![Conversation Reclaim demo on macOS](docs/screenshots/macos-demo-en.png) | ![Conversation Reclaim preview on Windows](docs/screenshots/windows-demo-en.png) |
 
 The values shown are clearly labeled demonstration data; the installed app
 calculates the real reclaimable space locally. The macOS image is based on the
@@ -90,6 +90,8 @@ python3 reclaim.py scan                    # read-only estimate
 python3 reclaim.py apply                   # apply; writes a change manifest to ~/.conversation-reclaim/
 python3 reclaim.py apply --backup-dir /Volumes/DISCO/respaldos-ia   # optional full backup first
 python3 reclaim.py apply --only antigravity   # one tool only
+python3 reclaim.py apply --only media         # only old temporary image attachments (optional)
+python3 reclaim.py apply --include-media      # include old temporary attachments in a full cleanup
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO   # prune opencode.db (opencode closed, backup required or --no-backup)
 python3 reclaim.py apply-db --no-backup --close-opencode  # warn, quit OpenCode normally, then prune
 python3 reclaim.py skills                  # list skills + find duplicates
@@ -117,6 +119,7 @@ English and it answers in English.
 | **OpenCode** | `~/.local/share/opencode/opencode.db` | part `type=compaction` with `tail_start_id` | `apply-db`: redundant streaming events + pre-compaction messages + VACUUM |
 | **OpenCode (files)** | `snapshot/`, `tool-output/`, `log/` | — | all local snapshots, tool outputs, logs |
 | **Antigravity / Gemini** | `~/.gemini/antigravity{,,-cli,-ide}/conversations/*.db` | steps `step_type 98` (CONVERSATION_HISTORY) | prunes pre-compaction steps + transcripts, scratch, logs, caches, `browser_recordings` |
+| **Temporary media (optional)** | OS temp `codex-clipboard-*` and Antigravity `tempmediaStorage` | older than 7 days, regular file, not open | deletes only structurally identified temporary images; old chat previews may disappear |
 | **Command Code** | `~/.commandcode/projects/` | none detected | scan/backup only |
 
 ## The OpenCode database problem (opencode-db-prune, integrated)
@@ -154,6 +157,11 @@ project (use it directly if you only care about the DB).
 - Before deleting subagent transcripts or Antigravity `browser_recordings`,
   the CLI prints their count and size. Browser recordings are already-consumed
   screenshots and Antigravity does not reuse them.
+- Temporary media is separate and **off by default**. `--only media` or
+  `--include-media` removes only old `codex-clipboard-*` files and images in
+  Antigravity's explicit temporary-media folders. Files newer than seven days,
+  files in use, symlinks, and images in normal brain/project folders are kept.
+  An old conversation may lose its local image preview after this cleanup.
 - Cleanup may run from inside Codex: the current task, locked rollouts and live
   log databases are skipped, while closed histories and other disposable data
   remain eligible. A later run can reclaim the current task after it closes.
@@ -161,6 +169,16 @@ project (use it directly if you only care about the DB).
   with symlinks).
 - Caches (tool-output, logs, snapshots, scratch) are safe to delete — prompt
   caching lives on the server, it does not cost tokens.
+
+### Local usage reports and billing
+
+Cleanup never changes provider billing, API charges, subscription usage,
+invoices, or server-side account records. However, tools such as
+[ccusage](https://github.com/ccusage/ccusage) build their historical reports
+from local agent logs. Trimming a transcript or deleting an old session can
+therefore make older local totals and session breakdowns lower or incomplete.
+Export the ccusage report to JSON before cleanup if that local history matters
+to you.
 
 ## Windows notes: how to find what to clean
 

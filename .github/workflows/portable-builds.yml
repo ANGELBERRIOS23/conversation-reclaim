@@ -2,6 +2,11 @@ name: desktop builds and releases
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create (for example v3.2.0)"
+        required: true
+        type: string
   push:
     tags:
       - "v*"
@@ -74,7 +79,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -88,10 +93,16 @@ jobs:
       - name: Generate signed updater index
         run: node scripts/generate-latest-json.mjs artifacts
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
           RELEASE_REPOSITORY: ${{ github.repository }}
       - name: Publish native desktop release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" artifacts/* --generate-notes --verify-tag --title "Conversation Reclaim $GITHUB_REF_NAME"
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            gh release create "$RELEASE_TAG" artifacts/* --generate-notes --verify-tag --title "Conversation Reclaim $RELEASE_TAG"
+          else
+            gh release create "$RELEASE_TAG" artifacts/* --generate-notes --target "$GITHUB_SHA" --title "Conversation Reclaim $RELEASE_TAG"
+          fi

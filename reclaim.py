@@ -40,8 +40,10 @@ from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home()
-VERSION = "2.4.0"
+VERSION = "3.2.0"
 MANIFEST_DIR = HOME / ".conversation-reclaim"
+TRANSIENT_MEDIA_MIN_AGE = 7 * 24 * 60 * 60
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 # ---------------------------------------------------------------------------
 # i18n: elige idioma por $RECLAIM_LANG, $LANG o --lang. Inglés o español.
@@ -121,6 +123,10 @@ _T = {
         "Pass --backup-dir <disk> to back up the DB, or --no-backup if you accept the risk.",
     "en": "across",
     "raíces,": "roots,",
+    "Medios temporales opcionales:": "Optional temporary media:",
+    "adjuntos antiguos": "old attachments",
+    "AVISO: puede quitar vistas previas de imágenes en conversaciones antiguas.":
+        "WARNING: this can remove image previews from old conversations.",
 }
 
 
@@ -403,6 +409,59 @@ def scan_codex():
             "active_subagents": active_subagents}
 
 
+def transient_media_candidates(reference_time=None):
+    """Adjuntos inequívocamente temporales, nunca imágenes de proyecto.
+
+    El umbral de siete días protege la tarea activa y evita borrar una imagen
+    justo después de pegarla. La categoría sigue siendo opcional porque una
+    conversación antigua puede conservar solo la ruta local de la miniatura.
+    """
+    cutoff = (time.time() if reference_time is None else reference_time) - TRANSIENT_MEDIA_MIN_AGE
+    found = []
+
+    try:
+        for path in Path(tempfile.gettempdir()).glob("codex-clipboard-*"):
+            if path.suffix.lower() in IMAGE_SUFFIXES:
+                found.append(path)
+    except OSError:
+        pass
+
+    gemini = PATHS["gemini"]
+    for brain in GEMINI_BRAIN_DIRS:
+        root = gemini / brain
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if path.suffix.lower() not in IMAGE_SUFFIXES:
+                continue
+            if not any(part in {".tempmediaStorage", "tempmediaStorage"}
+                       for part in path.parts):
+                continue
+            found.append(path)
+
+    candidates = []
+    seen = set()
+    for path in found:
+        try:
+            metadata = path.lstat()
+            resolved = path.resolve()
+            if resolved in seen or not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
+                continue
+            if metadata.st_mtime > cutoff or metadata.st_size <= 0:
+                continue
+            seen.add(resolved)
+            candidates.append(path)
+        except OSError:
+            continue
+    return sorted(candidates, key=str)
+
+
+def scan_transient_media():
+    files = transient_media_candidates()
+    return {"files": files, "n": len(files),
+            "total": sum(file_size(path) for path in files)}
+
+
 def scan_opencode():
     db = PATHS["opencode_db"]
     if not db.exists():
@@ -647,6 +706,11 @@ def scan():
         size = dir_size(path)
         disposable += size
         print(f"    {label:<22}{human(size):>10}")
+    media = scan_transient_media()
+    disposable += media["total"]
+    print(f"  {_('Medios temporales opcionales:')} {human(media['total'])} "
+          f"({media['n']} {_('adjuntos antiguos')})")
+    print(f"  {_('AVISO: puede quitar vistas previas de imágenes en conversaciones antiguas.')}")
     print(f"  Desechable adicional: {human(disposable)}")
     print(f"  Recuperable estimado total: {human(reclaim + disposable)}")
 
@@ -971,7 +1035,7 @@ def safe_copy(src, dst):
         pass
 
 
-def backup(backup_dir):
+def backup(backup_dir, include_media=False):
     root = Path(backup_dir).expanduser().resolve()
     sources = [Path(p).resolve() for p in
                (PATHS["claude_projects"], PATHS["codex_sessions"],
@@ -1084,6 +1148,16 @@ def backup(backup_dir):
                             symlinks=True)
             copied += dir_size(p)
             print(f"  {name}-logs      -> {human(dir_size(p))}")
+
+    if include_media:
+        media_root = dest / "temporary-media"
+        for index, source in enumerate(transient_media_candidates()):
+            target = media_root / f"{index:05d}-{source.name}"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            safe_copy(source, target)
+            copied += target.stat().st_size
+        if media_root.exists():
+            print(f"  temporary-media   -> {human(dir_size(media_root))}")
 
     print(f"  {_('TOTAL backup:')} {human(copied)}")
     return dest
@@ -1671,12 +1745,29 @@ def apply_antigravity(steps=True):
     return freed, entries
 
 
+def apply_transient_media():
+    freed = 0
+    entries = []
+    for path in transient_media_candidates():
+        state = database_in_use(path)
+        if state is not False:
+            continue
+        size = path.stat().st_size
+        removed = remove_path(path)
+        freed += removed
+        entries.append(change_entry("media", "delete_temporary_attachment", path,
+                                    size, reason="older than 7 days; optional preview cache"))
+    print(f"  medios temporales: {human(freed)}")
+    return freed, entries
+
+
 def apply(args):
     manifest = []
     dest = None
     if args.backup_dir:
         try:
-            dest = backup(args.backup_dir)
+            include_media = getattr(args, "include_media", False) or args.only == "media"
+            dest = backup(args.backup_dir, include_media=include_media)
         except (OSError, ValueError, sqlite3.Error) as exc:
             print(f"  REFUSED: el respaldo falló; no se aplicó ningún cambio: {exc}")
             return 4
@@ -1708,6 +1799,10 @@ def apply(args):
         manifest += e
     if only in (None, "antigravity"):
         f, e = apply_antigravity(steps=not args.no_antigravity_steps)
+        freed += f
+        manifest += e
+    if only == "media" or (only is None and getattr(args, "include_media", False)):
+        f, e = apply_transient_media()
         freed += f
         manifest += e
     if only == "caches":
@@ -1759,8 +1854,10 @@ def main(argv=None):
                     help="no podar los pasos pre-compactación en las DB de Antigravity")
     ap.add_argument("--only", default=None,
                     choices=["claude", "codex", "opencode", "antigravity",
-                             "commandcode", "caches"],
+                             "commandcode", "caches", "media"],
                     help="aplicar reducciones solo a esta herramienta")
+    ap.add_argument("--include-media", action="store_true",
+                    help="incluir adjuntos temporales de más de 7 días (puede quitar vistas previas antiguas)")
     ap.add_argument("--lang", default=None, choices=["es", "en"],
                     help="idioma de salida (por defecto: $LANG, español si no se detecta)")
     args = ap.parse_args(argv)
