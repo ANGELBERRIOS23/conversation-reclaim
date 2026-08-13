@@ -50,12 +50,22 @@ Dos formas de usarla:
 
 ```bash
 python3 reclaim.py scan                    # estimación de solo lectura
-python3 reclaim.py apply --backup-dir /Volumes/DISCO/respaldos-ia
+python3 reclaim.py apply                   # aplica; escribe manifiesto en ~/.conversation-reclaim/
+python3 reclaim.py apply --backup-dir /Volumes/DISCO/respaldos-ia   # respaldo completo opcional
 python3 reclaim.py apply --only antigravity   # solo una herramienta
-python3 reclaim.py apply-db                # poda opencode.db (opencode cerrado)
+python3 reclaim.py apply-db --backup-dir /Volumes/DISCO   # poda opencode.db (opencode cerrado; respaldo obligatorio o --no-backup)
 python3 reclaim.py skills                  # lista skills y detecta repetidas
 python3 reclaim.py restore --backup-dir /ruta
 ```
+
+**El respaldo es opcional, no es el comportamiento por defecto.** `apply` no
+copia nada a un disco externo salvo que pases `--backup-dir`. Sin él, cada
+cambio queda registrado en un manifiesto en
+`~/.conversation-reclaim/manifest-<fecha>.jsonl` (archivo, bytes recortados,
+offset del marcador, fecha), y los recortes JSONL son atómicos (temp + rename):
+si el script se interrumpe, el original queda intacto. `apply-db` es la única
+operación irreversible: **exige** un `--backup-dir` explícito (o `--no-backup`
+para asumir el riesgo).
 
 Idioma: la salida sigue `$RECLAIM_LANG`, luego `$LANG`, o usa `--lang es|en`.
 Pídele en español y responde en español; en inglés, en inglés.
@@ -84,8 +94,12 @@ esos eventos redundantes, luego poda los mensajes pre-compactación y hace
 
 ## Seguridad
 
-- **Respaldo primero, siempre.** `apply` copia todo lo que va a tocar al
-  `--backup-dir` (disco externo recomendado) antes de cambiar un solo byte.
+- **Respaldo opcional pero recomendado.** `apply` sin `--backup-dir` no copia
+  nada a ningún lado; en su lugar escribe un manifiesto de cambios en
+  `~/.conversation-reclaim/` y usa reemplazos atómicos de archivo (una corrida
+  interrumpida deja los originales intactos — ver la skill para las recetas
+  manuales de respaldo).
+- `apply-db` exige un respaldo explícito (`--backup-dir`) o `--no-backup`.
 - Refusa tocar `opencode.db` mientras opencode esté corriendo.
 - Pre-flight: no borra eventos si el contenido solo vive en la tabla de
   eventos.

@@ -37,7 +37,8 @@ from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home()
-VERSION = "2.0.0"
+VERSION = "2.1.0"
+MANIFEST_DIR = HOME / ".conversation-reclaim"
 
 # ---------------------------------------------------------------------------
 # i18n: elige idioma por $RECLAIM_LANG, $LANG o --lang. Inglés o español.
@@ -84,8 +85,7 @@ _T = {
     "liberado": "freed",
     "en uso, se omite": "in use, skipping",
     "pasos pre-compactación podados": "pre-compaction steps pruned",
-    "Aplicando reducciones (todo respaldado arriba)":
-        "Applying reductions (everything backed up above)",
+    "Aplicando reducciones": "Applying reductions",
     "Reducciones aplicadas:": "Reductions applied:",
     "Nota: la poda de opencode.db requiere opencode cerrado.":
         "Note: pruning opencode.db requires opencode to be closed.",
@@ -105,6 +105,16 @@ _T = {
     "ya symlink": "already symlink",
     "→ Sugerencia: conservar una canonical y symlink desde las otras.":
         "→ Suggestion: keep one canonical copy and symlink the others.",
+    "Sin respaldo externo (usa --backup-dir <disco> para uno completo).":
+        "No external backup (use --backup-dir <disk> for a full one).",
+    "Se escribe un manifiesto de cambios en ~/.conversation-reclaim/.":
+        "A change manifest is written to ~/.conversation-reclaim/.",
+    "Manifiesto:": "Manifest:",
+    "cambios registrados en": "changes recorded in",
+    "REFUSED: apply-db borra datos de forma irreversible (eventos + mensajes).":
+        "REFUSED: apply-db deletes data irreversibly (events + messages).",
+    "Pasa --backup-dir <disco> para respaldar la DB o --no-backup si aceptas el riesgo.":
+        "Pass --backup-dir <disk> to back up the DB, or --no-backup if you accept the risk.",
     "en": "across",
     "raíces,": "roots,",
 }
@@ -616,7 +626,12 @@ def backup(backup_dir):
 # ---------------------------------------------------------------------------
 
 def truncate_file_at_marker(f, markers, label):
-    """Recorta el archivo quedándonos desde el último marcador (inclusive)."""
+    """Recorta el archivo quedándonos desde el último marcador (inclusive).
+
+    Devuelve (bytes_recortados, tamaño_original, hecho, offset_del_marcador).
+    El reemplazo es atómico (tmp + replace): si el script falla a mitad,
+    el original queda intacto y solo sobra un archivo *.reclaim-tmp.
+    """
     size = f.stat().st_size
     last_marker = -1
     with open(f, "rb") as fh:
@@ -627,7 +642,7 @@ def truncate_file_at_marker(f, markers, label):
                 last_marker = offset
             offset += len(raw)
     if last_marker < 0:
-        return 0, size, False
+        return 0, size, False, -1
     kept = size - last_marker
     tmp = f.with_suffix(".jsonl.reclaim-tmp")
     with open(f, "rb") as fh:
@@ -635,36 +650,55 @@ def truncate_file_at_marker(f, markers, label):
         with open(tmp, "wb") as out:
             shutil.copyfileobj(fh, out)
     tmp.replace(f)
-    return size - kept, size, True
+    return size - kept, size, True, last_marker
+
+
+def write_manifest(entries):
+    """Registro de cada cambio aplicado (fallback: saber qué se tocó y cuándo)."""
+    MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
+    m = MANIFEST_DIR / f"manifest-{now()}.jsonl"
+    with open(m, "w") as fh:
+        for e in entries:
+            fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+    print(f"  {_('Manifiesto:')} {m}")
+    return m
 
 
 def apply_claude():
     base = PATHS["claude_projects"]
+    entries = []
     if not base.exists():
-        return 0
+        return 0, entries
     if database_in_use(base):
         print(f"  {_('AVISO: archivos de Claude Code en uso (¿claude corriendo?). Se omiten.')}")
-        return 0
+        return 0, entries
     freed = 0
     for f in sorted(base.glob("*/*.jsonl")):
-        cut, size, done = truncate_file_at_marker(f, CLAUDE_MARKERS, "claude")
+        cut, size, done, marker = truncate_file_at_marker(f, CLAUDE_MARKERS, "claude")
         if done:
             freed += cut
+            entries.append({"tool": "claude", "file": str(f),
+                            "cut_bytes": cut, "old_size": size,
+                            "marker_offset": marker, "time": now()})
             print(f"  {Path(f).name[:14]}... {human(cut)} de {human(size)} {_('recortados')}")
-    return freed
+    return freed, entries
 
 
 def apply_codex():
     base = PATHS["codex_sessions"]
+    entries = []
     freed = 0
     if not base.exists():
-        return 0
+        return 0, entries
     for f in sorted(base.rglob("*.jsonl")):
-        cut, size, done = truncate_file_at_marker(f, (CODEX_MARKER,), "codex")
+        cut, size, done, marker = truncate_file_at_marker(f, (CODEX_MARKER,), "codex")
         if done:
             freed += cut
+            entries.append({"tool": "codex", "file": str(f),
+                            "cut_bytes": cut, "old_size": size,
+                            "marker_offset": marker, "time": now()})
             print(f"  {Path(f).name[:30]}... {human(cut)} de {human(size)} {_('recortados')}")
-    return freed
+    return freed, entries
 
 
 def apply_opencode_files():
@@ -710,17 +744,32 @@ def apply_codex_cache():
     return freed
 
 
-def prune_opencode_db():
+def prune_opencode_db(backup_dir=None, no_backup=False):
     """Poda del opencode.db: requiere que opencode esté cerrado.
 
     Hace lo del proyecto opencode-db-prune (eventos redundantes) + poda
     pre-compactación. No toca la sesión de auditoría: solo recorta lo
     anterior a su última compactación.
+
+    Es destructivo e irreversible: exige un respaldo explícito
+    (--backup-dir) o aceptar el riesgo (--no-backup).
     """
     db = PATHS["opencode_db"]
     if not db.exists():
         print(f"  {_('no existe opencode.db')}")
         return 1
+    if not backup_dir and not no_backup:
+        print(f"  {_('REFUSED: apply-db borra datos de forma irreversible (eventos + mensajes).')}")
+        print(f"  {_('Pasa --backup-dir <disco> para respaldar la DB o --no-backup si aceptas el riesgo.')}")
+        return 7
+    if backup_dir:
+        dest = Path(backup_dir) / f"conversation-reclaim-{now()}"
+        dest.mkdir(parents=True, exist_ok=True)
+        db_backup = dest / "opencode.db"
+        sqlite3.connect(db).backup(sqlite3.connect(db_backup))
+        print(f"  {_('Backup en:')} {db_backup} ({human(db_backup.stat().st_size)})")
+    else:
+        print("  --no-backup: no hay copia de la DB. El manifiesto queda en ~/.conversation-reclaim/.")
     if _IS_WIN:
         print("  Windows: la detección de archivo en uso no está disponible.")
         print("  Asegúrate de que opencode esté completamente cerrado.")
@@ -910,17 +959,28 @@ def apply_antigravity(steps=True):
 
 
 def apply(args):
-    dest = backup(args.backup_dir)
+    manifest = []
+    dest = None
+    if args.backup_dir:
+        dest = backup(args.backup_dir)
+    else:
+        print()
+        print(f"  {_('Sin respaldo externo (usa --backup-dir <disco> para uno completo).')}")
+        print(f"  {_('Se escribe un manifiesto de cambios en ~/.conversation-reclaim/.')}")
     print()
     print("=" * 72)
-    print(f" {_('Aplicando reducciones (todo respaldado arriba)')}")
+    print(f" {_('Aplicando reducciones')}")
     print("=" * 72)
     freed = 0
     only = args.only
     if only in (None, "claude"):
-        freed += apply_claude()
+        f, e = apply_claude()
+        freed += f
+        manifest += e
     if only in (None, "codex"):
-        freed += apply_codex()
+        f, e = apply_codex()
+        freed += f
+        manifest += e
     if only in (None, "opencode"):
         freed += apply_opencode_files()
     if only in (None, "codex"):
@@ -931,10 +991,14 @@ def apply(args):
         freed += apply_opencode_files()
         freed += apply_codex_cache()
         freed += apply_antigravity(steps=False)
+    if manifest:
+        m = write_manifest(manifest)
+        print(f"  ({len(manifest)} {_('cambios registrados en')} {m})")
     print(f"\n  {_('Reducciones aplicadas:')} {human(freed)}")
     print(f"  {_('Nota: la poda de opencode.db requiere opencode cerrado.')}")
-    print(f"        {_('Respaldo completo en:')} {dest}")
-    print(f"        {_('Cuando cierres opencode:')}  python3 reclaim.py apply-db")
+    print(f"        {_('Cuando cierres opencode:')}  python3 reclaim.py apply-db --backup-dir <disco>")
+    if dest:
+        print(f"        {_('Respaldo completo en:')} {dest}")
 
 
 def restore(backup_dir):
@@ -952,8 +1016,10 @@ def main():
     ap = argparse.ArgumentParser(description="conversation-reclaim v" + VERSION)
     ap.add_argument("mode", nargs="?", default="scan",
                     choices=["scan", "apply", "apply-db", "restore", "skills"])
-    ap.add_argument("--backup-dir", default=str(HOME / "Documents" / "respaldos-ia"),
-                    help="destino del respaldo (disco externo recomendado)")
+    ap.add_argument("--backup-dir", default=None,
+                    help="destino del respaldo completo (opcional; disco externo recomendado)")
+    ap.add_argument("--no-backup", action="store_true",
+                    help="aplicar apply-db sin respaldo de la DB (asumir el riesgo)")
     ap.add_argument("--no-antigravity-steps", action="store_true",
                     help="no podar los pasos pre-compactación en las DB de Antigravity")
     ap.add_argument("--only", default=None,
@@ -990,9 +1056,9 @@ def main():
     elif args.mode == "apply":
         apply(args)
     elif args.mode == "apply-db":
-        prune_opencode_db()
+        prune_opencode_db(args.backup_dir, args.no_backup)
     elif args.mode == "restore":
-        restore(args.backup_dir)
+        restore(args.backup_dir or str(HOME / "respaldos-ia"))
 
 
 if __name__ == "__main__":

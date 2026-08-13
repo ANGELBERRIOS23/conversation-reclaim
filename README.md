@@ -49,12 +49,21 @@ Two ways to use it:
 
 ```bash
 python3 reclaim.py scan                    # read-only estimate
-python3 reclaim.py apply --backup-dir /Volumes/DISCO/respaldos-ia
+python3 reclaim.py apply                   # apply; writes a change manifest to ~/.conversation-reclaim/
+python3 reclaim.py apply --backup-dir /Volumes/DISCO/respaldos-ia   # optional full backup first
 python3 reclaim.py apply --only antigravity   # one tool only
-python3 reclaim.py apply-db                # prune opencode.db (opencode must be closed)
+python3 reclaim.py apply-db --backup-dir /Volumes/DISCO   # prune opencode.db (opencode closed, backup required or --no-backup)
 python3 reclaim.py skills                  # list skills + find duplicates
 python3 reclaim.py restore --backup-dir /ruta
 ```
+
+**Backups are optional, not the default.** `apply` does not copy anything to
+an external disk unless you pass `--backup-dir`. Without it, every change is
+still recorded in a manifest at `~/.conversation-reclaim/manifest-<date>.jsonl`
+(file, bytes cut, marker offset, timestamp), and the JSONL trims are atomic
+(temp file + rename), so an interrupted run leaves the original intact.
+`apply-db` is the only irreversible operation: it **requires** an explicit
+`--backup-dir` (or `--no-backup` to accept the risk).
 
 Language: the output follows `$RECLAIM_LANG`, then `$LANG`, or use
 `--lang es|en`. Ask the tool in Spanish and it answers in Spanish; ask in
@@ -83,8 +92,11 @@ project (use it directly if you only care about the DB).
 
 ## Safety
 
-- **Backup first, always.** `apply` copies everything it will touch to
-  `--backup-dir` (external disk recommended) before changing a single byte.
+- **Backup optional but recommended.** `apply` without `--backup-dir` never
+  copies data anywhere; instead it writes a change manifest to
+  `~/.conversation-reclaim/` and uses atomic file replacements (an interrupted
+  run leaves originals intact — see the skill for manual fallback recipes).
+- `apply-db` requires an explicit backup (`--backup-dir`) or `--no-backup`.
 - Refuses to touch `opencode.db` while opencode is running.
 - Pre-flight check: won't delete events if the content only lives in the event
   table.

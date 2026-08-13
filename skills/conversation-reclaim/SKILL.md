@@ -32,11 +32,19 @@ elementos pesados no automáticos (recordings, backups).
 |---|---|
 | `python3 reclaim.py scan` | Solo lectura: cuánto se puede liberar por herramienta y por conversación, caches, y skills repetidas. **Siempre correrlo primero** y reportar números al usuario. |
 | `python3 reclaim.py skills` | Lista todas las skills por tamaño y marca las repetidas (copias reales que ocupan doble) vs las que ya son symlink. |
-| `python3 reclaim.py apply --backup-dir <disco>` | Respalda TODO en el disco (externo recomendado) y luego recorta/poda todo lo seguro. Pide confirmación antes si el usuario no la dio. |
+| `python3 reclaim.py apply` | Aplica reducciones **sin respaldo externo** (escribe un manifiesto de cambios en `~/.conversation-reclaim/`). |
+| `python3 reclaim.py apply --backup-dir <disco>` | **Opcional**: respalda TODO en el disco (externo recomendado) y luego reduce. |
 | `python3 reclaim.py apply --only claude\|codex\|opencode\|antigravity\|caches` | Aplicar solo a una herramienta. |
 | `python3 reclaim.py apply --no-antigravity-steps` | Antigravity sin podar las DB de conversación (solo transcripts/logs). |
-| `python3 reclaim.py apply-db` | Poda `opencode.db` (eventos redundantes + pre-compactación + VACUUM). **Refusa si opencode está corriendo** — avisar al usuario que lo cierre. |
-| `python3 reclaim.py restore --backup-dir <ruta>` | Guía de restauración desde el respaldo. |
+| `python3 reclaim.py apply-db --backup-dir <disco>` | Poda `opencode.db` (eventos redundantes + pre-compactación + VACUUM). **Exige respaldo explícito o `--no-backup`.** **Refusa si opencode está corriendo**. |
+| `python3 reclaim.py restore --backup-dir <ruta>` | Guía de restauración desde el respaldo (si se hizo uno). |
+
+**Regla de respaldo por defecto:** el respaldo externo NO es automático. Si el
+usuario no pasa `--backup-dir`, `apply` funciona igual pero solo deja un
+manifiesto (qué archivo, cuántos bytes, offset del marcador, fecha). Los
+recortes de Claude/Codex son atómicos (temp + replace): si el script muere a
+mitad, el original queda intacto. Para `apply-db` el respaldo es obligatorio
+(flag `--backup-dir` o `--no-backup`): es la única operación irreversible.
 
 ## Qué limpia `apply` por herramienta
 
@@ -85,20 +93,92 @@ usuario): dejar una canonical y reemplazar las demás por symlink
 (`ln -s ../../.claude/skills/<nombre> <otra-raíz>/<nombre>`), como ya hace
 `~/.gemini/skills/media-use`.
 
+## Fallback: si el script falla o se hace a mano
+
+Todo lo que la herramienta hace se puede hacer/revisar manualmente. Esto es lo
+que se sabe de cada almacenamiento (usado para diagnosticar y para limpieza
+manual si la herramienta no corre):
+
+**Manifiesto de cambios** (siempre se escribe): `~/.conversation-reclaim/manifest-<fecha>.jsonl`
+— cada línea: `{"tool","file","cut_bytes","old_size","marker_offset","time"}`.
+Úsalo para saber exactamente qué se tocó. Los `*.reclaim-tmp` que queden tras
+una interrupción se pueden borrar (el original quedó intacto si el replace no
+se ejecutó).
+
+**Verificación rápida después de tocar algo:**
+```bash
+# Claude/Codex: el archivo debe ser JSONL válido desde la primera línea
+python3 -c "import json;[json.loads(l) for l in open('ruta.jsonl')]"
+# DBs SQLite
+sqlite3 ruta.db "PRAGMA integrity_check"        # → ok
+```
+
+**Claude Code** (`~/.claude/projects/<proyecto>/<uuid>.jsonl`): recorte manual:
+```bash
+python3 - <<'EOF'
+import json, pathlib
+p = pathlib.Path("ARCHIVO.jsonl"); out = []
+marker = 0
+for i, raw in enumerate(open(p, 'rb')):
+    if b'compactMetadata' in raw or b'Conversation compacted' in raw:
+        marker += len(raw)  # el ÚLTIMO marcador es el que vale
+    else:
+        marker += len(raw)
+EOF
+```
+(equivalente: `grep -n 'Conversation compacted' archivo.jsonl` → el último
+número de línea; conservar desde ahí con `tail -n +N archivo.jsonl > nuevo`).
+
+**Codex** (`~/.codex/sessions/<año>/<mes>/<día>/rollout-*.jsonl`): igual, con el
+evento `"type":"compacted"`.
+
+**OpenCode** (`opencode.db`, tabla `event` con tipos `message.part.updated.1`,
+`message.updated.1`, `session.updated.1` que duplican cada part en streaming):
+```bash
+sqlite3 opencode.db "SELECT count(*), sum(length(data)) FROM event WHERE type='message.part.updated.1'"
+# limpieza manual de los redundantes (tras respaldar y con opencode cerrado):
+sqlite3 opencode.db "DELETE FROM event WHERE type IN ('message.updated.1','message.part.updated.1','session.updated.1'); VACUUM;"
+```
+Marcador de compactación: part `type=compaction` con `tail_start_id` (todo
+mensaje anterior a ese id es pre-compactación).
+
+**Antigravity/Gemini** (`~/.gemini/antigravity{,,-cli,-ide}/`): conversaciones
+en `conversations/<id>.db` (pasos `step_type 98` = compactación), transcripts
+en `brain/<id>/.system_generated/logs/transcript*.jsonl`, imágenes del modo
+browser en `antigravity-ide/browser_recordings/` (pesan GB, son capturas de
+sesiones de browser, borrables si son viejas), y `antigravity-backup/` (ver con
+el usuario si es suyo y si lo sigue usando).
+
+**Caches 100% seguros** (borrar no cuesta tokens — el prompt caching vive en el
+servidor): `opencode snapshot/` (huérfanos si `session_context_epoch` está
+vacía), `tool-output/`, `log/`, `.gemini/*/{log,crashes,cache,scratch}`,
+`logs` de las apps Antigravity, `~/.codex/cache` y `logs_*.sqlite`.
+
+**Restauración** con `restore`: copiar desde el respaldo `claude-projects/`,
+`codex-sessions/`, `opencode.db`, `gemini-*/` etc. a sus rutas originales.
+
+**Windows**: rutas bajo `%USERPROFILE%\.claude`, `%USERPROFILE%\.codex`,
+`%USERPROFILE%\.local\share\opencode` (o `%LOCALAPPDATA%\opencode`),
+`%USERPROFILE%\.gemini`, `%USERPROFILE%\.commandcode`, `%APPDATA%\Antigravity`.
+En Windows no hay `lsof`: `apply-db` no detecta la DB abierta, cerrar opencode
+a mano.
+
 ## Flujo de trabajo recomendado
 
 1. **Escanear**: `python3 reclaim.py scan` → reportar total escaneado y
    recuperable, más los top por conversación y los caches (snapshots huérfanos
    de opencode, tool-output, logs, scratch, recordings).
-2. **Preguntar al usuario** qué autoriza. Regla del usuario: *backup primero,
-   aplicar después*.
-3. **Backup + aplicar**: `apply --backup-dir /Volumes/<disco>` (o `--only`).
-   Anotar la ruta del respaldo generado.
+2. **Preguntar al usuario** qué autoriza y si quiere respaldo externo
+   (`--backup-dir /Volumes/<disco>`) o ir sin respaldo (solo manifiesto).
+   Regla del usuario: *si hay respaldo, backup primero; después aplicar*.
+3. **Aplicar**: `apply [--backup-dir <disco>]` (o `--only`). Anotar la ruta del
+   respaldo si se hizo y la del manifiesto.
 4. **Verificar**: `PRAGMA integrity_check` en DBs tocadas, validar JSONL
    recortados, y pedir al usuario que pruebe reanudar una conversación de cada
    herramienta.
 5. **opencode.db**: si opencode está corriendo, `apply-db` no puede ejecutarse;
-   darle el comando exacto al usuario para cuando lo cierre.
+   darle el comando exacto al usuario para cuando lo cierre, recordando que
+   requiere `--backup-dir` o `--no-backup`.
 
 ## Reglas de seguridad (no romperlas)
 
