@@ -147,6 +147,45 @@ Notas para usuarios de Windows:
   browser + respaldos que ya no servían).
 - Skills: 12 duplicadas en 5 raíces (~17 MB, deduplicación vía symlinks).
 
+## Aviso legal (disclaimer)
+
+**Sin garantía, úsalo bajo tu propio riesgo.** Esta herramienta borra datos
+(contenido pre-compactación, caches, transcripts de subagentes, eventos
+redundantes). Está diseñada para que tus conversaciones sigan funcionando — se
+conservan el resumen y los mensajes recientes — pero eres **totalmente
+responsable de lo que le pides a tu agente que elimine**. Si borras una
+conversación importante, es decisión de quien lo pidió, no de este proyecto.
+Revisa siempre la salida de `scan` antes de `apply`, y usa `--backup-dir` ante
+la duda.
+
+## Contribuciones — nuevos harness bienvenidos
+
+Este proyecto quiere cubrir **todos los harness de IA**, no solo los actuales.
+Son bienvenidas las contribuciones para **Cursor, Kiro, Ghost, Trae, los
+harness de DeepSeek o cualquier otro** — incluido un harness que estés
+construyendo tú mismo.
+
+Checklist para el PR (para que los mantenedores puedan confiar y verificar):
+
+1. **Indica el SO donde probaste** (p. ej. "probado en Windows 11 Pro 24H2",
+   "probado en macOS 15, Linux sin probar").
+2. **Indica el nombre de la herramienta y una URL** — el repo del CLI/app, la
+   página del marketplace o sus docs — para que los mantenedores puedan
+   verificar que la herramienta existe y cómo guarda datos antes de revisar.
+3. Explica **dónde viven los datos** y **cuál es el marcador de compactación**
+   (un campo del JSONL, una tabla/columna de SQLite, un tipo de evento...).
+   Reutiliza los mismos patrones: `scan_<tool>()` + `apply_<tool>()` + una
+   entrada en `PATHS`.
+4. Muestra la salida de `scan` de tu herramienta antes/después, y confirma que
+   el resume funciona tras el recorte.
+5. **Todo PR pasa revisión humana** antes de aprobarse. Ningún automatismo
+   fusiona código externo. Mantén los cambios en un solo archivo
+   (`reclaim.py`) más los docs.
+
+Si no escribes código: abre un **issue** con el nombre de la herramienta,
+dónde viven sus conversaciones y una muestra del formato de almacenamiento —
+eso ya es una gran contribución.
+
 ## Licencia
 
 MIT — ver [LICENSE](LICENSE).

@@ -65,6 +65,8 @@ _T = {
     "TOTAL backup:": "TOTAL backup:",
     "AVISO: archivos de Claude Code en uso (¿claude corriendo?). Se omiten.":
         "WARNING: Claude Code files in use (claude running?). Skipping.",
+    "subagentes eliminados:": "subagents deleted:",
+    "archivos,": "files,",
     "recortados": "trimmed",
     "snapshots huérfanos:": "orphan snapshots:",
     "codex cache:": "codex cache:",
@@ -226,7 +228,17 @@ def scan_claude():
             compacted += 1
             reclaim += last_marker
             top.append((last_marker, size, str(f)))
+    # Subagentes hijos (transcripts de un solo uso) — se conservan los acompact
+    sub = sub_big = 0
+    for p in base.rglob("subagents/agent-*.jsonl"):
+        if "acompact" in p.name:
+            continue
+        sub += p.stat().st_size
+        sub_big += 1
+    workflows = sum(p.stat().st_size for p in base.rglob("subagents/workflows/*"))
     return {"total": total, "reclaim": reclaim, "compacted": compacted,
+            "subagents_bytes": sub, "subagents_n": sub_big,
+            "workflows_bytes": workflows,
             "top": sorted(top, reverse=True)}
 
 
@@ -465,8 +477,13 @@ def scan():
         total += tot
         reclaim += rec
         extra = ""
+        ncomp = r.get("compacted", 0)
         if name == "Codex":
             extra = f"  | archived_sessions: {human(r.get('archived',0))}"
+        elif name == "Claude Code":
+            extra = (f"  | subagentes: {human(r.get('subagents_bytes',0))} "
+                     f"({r.get('subagents_n',0)}) + workflows "
+                     f"{human(r.get('workflows_bytes',0))}")
         if name == "OpenCode":
             extra = (f"  | {_('eventos redundantes:')} {human(r['redundant'][1])} "
                      f"({r['redundant'][0]:,} {_('filas')})")
@@ -478,8 +495,6 @@ def scan():
             ncomp = r.get("compacted", 0)
             tot = r.get("conv_total", 0) + r.get("wal_total", 0)
             rec = r.get("reclaim", 0)
-        else:
-            ncomp = r.get("compacted", 0)
         print(f"{name:<13}{human(tot):>10}  {_('recuperable por compactación:')} {human(rec):>9}  "
               f"({ncomp} {_('compactadas')}){extra}")
         for b, s, fpath in r.get("top", [])[:4]:
@@ -681,6 +696,28 @@ def apply_claude():
                             "cut_bytes": cut, "old_size": size,
                             "marker_offset": marker, "time": now()})
             print(f"  {Path(f).name[:14]}... {human(cut)} de {human(size)} {_('recortados')}")
+
+    # Subagentes hijos (transcripts de un solo uso del modo ultra/plan etc.)
+    # Se conservan los agent-acompact (resúmenes de compactación) y los memory/.
+    sub_n = sub_bytes = 0
+    for p in base.rglob("subagents/agent-*.jsonl"):
+        if "acompact" in p.name:
+            continue
+        sub_bytes += p.stat().st_size
+        sub_n += 1
+        p.unlink()
+        for meta in (Path(str(p) + ".meta.json"),):
+            if meta.exists():
+                meta.unlink()
+    for wf in base.rglob("subagents/workflows"):
+        sub_bytes += dir_size(wf)
+        shutil.rmtree(wf)
+    if sub_n:
+        print(f"  {_('subagentes eliminados:')} {sub_n} {_('archivos,')} {human(sub_bytes)}")
+        entries.append({"tool": "claude", "file": "subagents/*",
+                        "cut_bytes": sub_bytes, "old_size": sub_bytes,
+                        "marker_offset": -1, "time": now(),
+                        "note": f"subagent transcripts ({sub_n} files)"})
     return freed, entries
 
 

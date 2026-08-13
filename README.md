@@ -143,6 +143,41 @@ Notes for Windows users:
   recordings + backups the user no longer needed).
 - Skills: 12 duplicates found across 5 skill roots (~17 MB, dedup via symlinks).
 
+## Disclaimer
+
+**No warranty, use at your own risk.** This tool deletes data (pre-compaction
+conversation content, caches, subagent transcripts, redundant events). It is
+designed to keep your conversations working — the summary and recent messages
+are preserved — but you are **fully responsible for what you ask your AI agent
+to delete**. If you remove an important conversation, that is the caller's
+decision, not this project's. Always review `scan` output before `apply`, and
+use `--backup-dir` when in doubt.
+
+## Contributing — new harnesses welcome
+
+This project wants to cover **every AI coding harness**, not just the current
+ones. Contributions for **Cursor, Kiro, Ghost, Trae, the DeepSeek harnesses,
+or anything else** are welcome — including a harness you are building yourself.
+
+PR checklist (so the maintainers can trust and verify it):
+
+1. **State the OS you tested on** (e.g. "tested on Windows 11 Pro 24H2",
+   "tested on macOS 15, Linux not tested").
+2. **State the tool name and a URL** — the CLI/app repository, marketplace
+   page or docs link — so the maintainers can verify the tool actually exists
+   and how it stores data before reviewing.
+3. Explain **where the data lives** and **what the compaction marker is**
+   (a JSONL field, a SQLite table/column, an event type...). Reuse the same
+   patterns: `scan_<tool>()` + `apply_<tool>()` + an entry in `PATHS`.
+4. Show the `scan` output for your tool before/after, and confirm resume works
+   after trimming.
+5. **Every PR gets a human review** before anything is merged. No automation
+   merges external code. Keep changes in one file (`reclaim.py`) plus docs.
+
+Even if you don't write code: open an **issue** with the tool name, where its
+conversations live, and a sample of the storage format — that is already a
+great contribution.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

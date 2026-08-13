@@ -199,6 +199,24 @@ a mano.
 - **Skills: solo listar y recomendar. Nunca borrarlas.** Si el usuario quiere
   deduplicar, proponer symlinks y pedir confirmación explícita.
 
+## Disclaimer (decírselo al usuario cuando haga falta)
+
+La herramienta borra datos (contenido pre-compactación, caches, transcripts de
+subagentes). El diseño conserva resumen + reciente, pero **quien pide el
+borrado es responsable de lo que se borra**. Antes de `apply`, mostrar siempre
+la salida de `scan` y confirmar con el usuario; recomendar `--backup-dir` ante
+la duda. Si el usuario pide borrar una conversación entera a propósito, es su
+decisión.
+
+## Contribuciones a la herramienta (si el usuario quiere aportar)
+
+Bienvenidos soportes para Cursor, Kiro, Ghost, Trae, harnesses de DeepSeek o
+cualquiera. El PR debe indicar: SO donde se probó, nombre + URL del CLI/app
+para verificar que existe y cómo guarda datos, dónde vive el historial y cuál
+es su marcador de compactación (siguiendo `scan_<tool>()` + `apply_<tool>()` +
+`PATHS`), salida de scan antes/después y confirmación de que el resume
+funciona. **Todo PR pasa revisión humana antes de aprobarse.**
+
 ## Ejemplos típicos
 
 ```bash
