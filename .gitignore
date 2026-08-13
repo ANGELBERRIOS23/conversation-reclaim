@@ -5,3 +5,6 @@ htmlcov/
 build/
 dist/
 *.spec
+node_modules/
+src-tauri/target/
+.DS_Store

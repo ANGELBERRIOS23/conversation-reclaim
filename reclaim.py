@@ -1565,7 +1565,7 @@ def restore(backup_dir):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="conversation-reclaim v" + VERSION)
     ap.add_argument("mode", nargs="?", default="scan",
-                    choices=["scan", "apply", "apply-db", "restore", "skills", "gui"])
+                    choices=["scan", "apply", "apply-db", "restore", "skills"])
     ap.add_argument("--backup-dir", default=None,
                     help="destino del respaldo completo (opcional; disco externo recomendado)")
     ap.add_argument("--no-backup", action="store_true",
@@ -1614,15 +1614,6 @@ def main(argv=None):
     elif args.mode == "restore":
         restore(args.backup_dir or str(HOME / "respaldos-ia"))
         return 0
-    elif args.mode == "gui":
-        try:
-            from desktop import main as gui_main
-        except ModuleNotFoundError as exc:
-            if exc.name != "PySide6":
-                raise
-            print("PySide6 no está instalado; se abrirá la interfaz clásica de respaldo.")
-            from gui import main as gui_main
-        return gui_main()
     return 0
 
 

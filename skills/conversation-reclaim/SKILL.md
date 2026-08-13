@@ -33,7 +33,6 @@ CLI Python sin dependencias externas.
 
 | Comando | Acción |
 |---|---|
-| `python3 reclaim.py gui` | Abre el panel visual de selección y confirmación. |
 | `python3 reclaim.py scan` | Escaneo de solo lectura. Ejecutar primero. |
 | `python3 reclaim.py skills` | Lista skills y duplicados; nunca los elimina. |
 | `python3 reclaim.py apply` | Limpia y escribe manifiesto sin respaldo externo. |
@@ -77,9 +76,9 @@ CLI Python sin dependencias externas.
 
 ## Interfaz visual
 
-Usar `desktop.py` (Qt 6) como interfaz principal y `gui.py` (Tk) únicamente
-como fallback para código fuente sin PySide6. Ambas son capas delgadas sobre
-las funciones auditadas de `reclaim.py`.
+La aplicación portable usa Tauri 2: React/TypeScript en `src/` y un motor Rust
+independiente en `src-tauri/`. El CLI y esta skill siguen usando `reclaim.py`
+para la limpieza avanzada y la poda de bases de datos.
 Mostrar estimación, recomendación, explicación y estado activo por categoría;
 marcar por defecto solo elementos recomendados con tamaño mayor que cero. Dejar
 que el usuario desmarque categorías, elija respaldo y confirme el conjunto
@@ -95,15 +94,14 @@ El cierre automático de OpenCode es solo macOS; pedir cierre manual en Windows.
 
 Ofrecer varias rutas sin mezclar sus requisitos:
 
-- Releases: `Conversation Reclaim.exe` portable para Windows x64 y `.app`
+- Releases: `conversation-reclaim.exe` portable para Windows x64 y `.app`
   autocontenida separada para macOS Apple Silicon e Intel. No requieren Python.
-- Código fuente: `Conversation Reclaim.app`, `launch-gui.command` o
-  `launch-gui.bat`; estos sí requieren Python con Tk.
-- Agentes/desarrolladores: `python3 reclaim.py gui` o el CLI.
+- Desarrollo de la app: `npm run tauri dev`; build: `npm run tauri build`.
+- Agentes/desarrolladores: usar el CLI Python para todas las opciones avanzadas.
 
 Construir cada binario en su propio sistema operativo mediante
-`.github/workflows/portable-builds.yml`; PyInstaller no es cross-compiler.
-Ejecutar `--smoke-test` sobre cada binario antes de publicar el ZIP. Avisar que
+`.github/workflows/portable-builds.yml`; Tauri compila el frontend y el motor
+Rust en GitHub Actions. Probar ambos antes de publicar el ZIP. Avisar que
 los builds sin certificado pueden activar Gatekeeper o SmartScreen y que una
 distribución pública pulida necesita firma/notarización del propietario.
 

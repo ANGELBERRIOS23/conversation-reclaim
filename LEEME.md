@@ -44,16 +44,11 @@ Tres formas de usarla:
    agente *"libera espacio de mis conversaciones"* (o en inglés; la herramienta
    habla el idioma en el que le hables). La skill conoce los marcadores, las
    reglas de seguridad y el flujo revisión-primero. Así la usa el autor.
-2. **Interfaz visual** — la app portable usa Qt 6 con una interfaz moderna y
-   adaptable para macOS/Windows, más selector Español/English que recuerda la
-   preferencia. Ejecuta `python3 reclaim.py gui` en macOS/Linux o
-   `py reclaim.py gui` en Windows. El panel mide cada categoría, marca lo
-   recomendado, explica qué conserva, permite desmarcar lo que quieras, ofrece
-   respaldo externo y confirma antes de escribir. Desde el código fuente, en
-   macOS abre **`Conversation Reclaim.app`** y en Windows usa `launch-gui.bat`;
-   estos launchers usan un Python/Tk instalado. Las descargas portables de abajo
-   ya incluyen su runtime. `launch-gui.command` queda como alternativa de
-   terminal.
+2. **Interfaz visual** — una aplicación nativa Tauri 2 con interfaz React y
+   motor de limpieza en Rust. Respeta el modo claro/oscuro del sistema, se
+   adapta a ventanas pequeñas, recuerda Español/English, marca lo recomendado
+   y confirma antes de escribir. La app portable es independiente del CLI:
+   quien la descarga no instala Python, Node ni Rust.
 3. **Directo desde la terminal** — un CLI de Python (solo
    stdlib), sin dependencias ni instalación. Corre `scan` primero, revisa los
    números, y luego `apply` con un destino de respaldo:
@@ -67,15 +62,13 @@ pueden ofrecer tres descargas autocontenidas generadas por GitHub Actions:
 - **macOS Apple Silicon:** descomprime el paquete `macOS-arm64` y abre la app.
 - **macOS Intel:** descomprime el paquete `macOS-x64` y abre la app.
 
-Esos paquetes ya incluyen su propio runtime de Python y Qt 6: el usuario no
-instala Python ni ninguna dependencia. Los launchers
-del código fuente quedan para quienes ya tengan Python. Un build de desarrollo
+Esos paquetes contienen la aplicación React/Rust ya compilada: el usuario no
+instala Python ni ninguna dependencia. Un build de desarrollo
 sin certificado puede requerir **clic derecho → Abrir** en macOS o confirmar
 Windows SmartScreen. Cada tag `v*` crea los tres paquetes y los adjunta al
 Release; el workflow también se puede ejecutar manualmente.
 
 ```bash
-python3 reclaim.py gui                    # revisión y limpieza visual
 python3 reclaim.py scan                    # estimación de solo lectura
 python3 reclaim.py apply                   # aplica; escribe manifiesto en ~/.conversation-reclaim/
 python3 reclaim.py apply --backup-dir /Volumes/DISCO/respaldos-ia   # respaldo completo opcional
@@ -241,7 +234,11 @@ Para construir el paquete nativo del sistema operativo actual:
 
 ```bash
 python3 -m pip install -r requirements-build.txt
-python3 packaging/build.py
+npm ci
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml
+npm run tauri build -- --bundles app       # macOS .app
+# Windows: npm run tauri build -- --no-bundle
 ```
 
 Cubren marcadores estructurados, recortes atómicos con permisos, subagentes,

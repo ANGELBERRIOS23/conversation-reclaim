@@ -20,6 +20,19 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile
-        run: python -m py_compile reclaim.py gui.py desktop.py packaging/build.py tests/test_reclaim.py tests/test_gui.py
+        run: python -m py_compile reclaim.py tests/test_reclaim.py
       - name: Test
         run: python -m unittest discover -v
+
+  desktop:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run build
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
