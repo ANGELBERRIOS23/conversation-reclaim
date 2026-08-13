@@ -3,6 +3,7 @@
 
 import io
 import queue
+import sys
 import threading
 import traceback
 from contextlib import redirect_stdout
@@ -423,7 +424,13 @@ class ReclaimApp:
         self.root.after(100, self._drain_events)
 
 
-def main():
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args == ["--smoke-test"]:
+        return 0 if len(scan_categories()) == len(CATEGORY_ORDER) else 2
+    if args:
+        print("Uso: gui.py [--smoke-test]")
+        return 2
     try:
         root = tk.Tk()
     except tk.TclError as exc:

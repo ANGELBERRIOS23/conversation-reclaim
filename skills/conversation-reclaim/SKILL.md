@@ -87,6 +87,22 @@ que CLI y GUI compartan las mismas protecciones y manifiestos.
 En Windows, detectar archivos abiertos mediante la API nativa de file sharing.
 El cierre automático de OpenCode es solo macOS; pedir cierre manual en Windows.
 
+## Distribución visual
+
+Ofrecer varias rutas sin mezclar sus requisitos:
+
+- Releases: `Conversation Reclaim.exe` portable para Windows x64 y `.app`
+  autocontenida separada para macOS Apple Silicon e Intel. No requieren Python.
+- Código fuente: `Conversation Reclaim.app`, `launch-gui.command` o
+  `launch-gui.bat`; estos sí requieren Python con Tk.
+- Agentes/desarrolladores: `python3 reclaim.py gui` o el CLI.
+
+Construir cada binario en su propio sistema operativo mediante
+`.github/workflows/portable-builds.yml`; PyInstaller no es cross-compiler.
+Ejecutar `--smoke-test` sobre cada binario antes de publicar el ZIP. Avisar que
+los builds sin certificado pueden activar Gatekeeper o SmartScreen y que una
+distribución pública pulida necesita firma/notarización del propietario.
+
 ## Garantías y manifiesto
 
 - Fallar cerrado ante JSON inválido, marcador ambiguo, symlink inesperado,

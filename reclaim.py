@@ -40,7 +40,7 @@ from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home()
-VERSION = "2.3.0"
+VERSION = "2.3.1"
 MANIFEST_DIR = HOME / ".conversation-reclaim"
 
 # ---------------------------------------------------------------------------

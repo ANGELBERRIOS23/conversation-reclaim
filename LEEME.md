@@ -47,12 +47,29 @@ Tres formas de usarla:
 2. **Interfaz visual** — ejecuta `python3 reclaim.py gui` en macOS/Linux o
    `py reclaim.py gui` en Windows. El panel mide cada categoría, marca lo
    recomendado, explica qué conserva, permite desmarcar lo que quieras, ofrece
-   respaldo externo y confirma antes de escribir. También puedes abrir
-   `launch-gui.command` en macOS o `launch-gui.bat` en Windows. Usa Python/Tk;
-   no necesita Flutter, Go, Node ni servidor web.
+   respaldo externo y confirma antes de escribir. Desde el código fuente, en
+   macOS abre **`Conversation Reclaim.app`** y en Windows usa `launch-gui.bat`;
+   estos launchers usan un Python/Tk instalado. Las descargas portables de abajo
+   ya incluyen su runtime. `launch-gui.command` queda como alternativa de
+   terminal.
 3. **Directo desde la terminal** — un CLI de Python (solo
    stdlib), sin dependencias ni instalación. Corre `scan` primero, revisa los
    números, y luego `apply` con un destino de respaldo:
+
+### Opciones de descarga
+
+Los [Releases de GitHub](https://github.com/ANGELBERRIOS23/conversation-reclaim/releases)
+pueden ofrecer tres descargas autocontenidas generadas por GitHub Actions:
+
+- **Windows x64 portable:** descomprime y abre `Conversation Reclaim.exe`.
+- **macOS Apple Silicon:** descomprime el paquete `macOS-arm64` y abre la app.
+- **macOS Intel:** descomprime el paquete `macOS-x64` y abre la app.
+
+Esos paquetes ya incluyen Python y Tk: el usuario no instala nada. Los launchers
+del código fuente quedan para quienes ya tengan Python. Un build de desarrollo
+sin certificado puede requerir **clic derecho → Abrir** en macOS o confirmar
+Windows SmartScreen. Cada tag `v*` crea los tres paquetes y los adjunta al
+Release; el workflow también se puede ejecutar manualmente.
 
 ```bash
 python3 reclaim.py gui                    # revisión y limpieza visual
@@ -215,6 +232,13 @@ El proyecto sigue usando solo la biblioteca estándar. Ejecuta las regresiones:
 
 ```bash
 python3 -m unittest discover -v
+```
+
+Para construir el paquete nativo del sistema operativo actual:
+
+```bash
+python3 -m pip install -r requirements-build.txt
+python3 packaging/build.py
 ```
 
 Cubren marcadores estructurados, recortes atómicos con permisos, subagentes,

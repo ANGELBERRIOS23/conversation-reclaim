@@ -1,0 +1,34 @@
+#!/bin/zsh
+
+set -u
+
+repo_root="${0:A:h:h:h}"
+gui_log="${TMPDIR:-/tmp}/conversation-reclaim-gui.log"
+python_bin=""
+
+for candidate in \
+    /opt/homebrew/bin/python3 \
+    /usr/local/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/Current/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 \
+    /usr/bin/python3; do
+    if [[ -x "$candidate" ]] && "$candidate" -c 'import tkinter' >/dev/null 2>&1; then
+        python_bin="$candidate"
+        break
+    fi
+done
+
+if [[ -z "$python_bin" ]]; then
+    /usr/bin/osascript -e 'display alert "Conversation Reclaim" message "No se encontró Python 3 con Tk. Instala Python desde python.org y vuelve a intentarlo." as critical'
+    exit 1
+fi
+
+cd "$repo_root" || exit 1
+"$python_bin" reclaim.py gui >>"$gui_log" 2>&1
+status=$?
+
+if (( status != 0 )); then
+    /usr/bin/osascript -e 'display alert "Conversation Reclaim no pudo abrirse" message "Revisa conversation-reclaim-gui.log dentro de la carpeta temporal de macOS." as critical'
+fi
+
+exit "$status"

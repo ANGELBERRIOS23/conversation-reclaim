@@ -1,0 +1,72 @@
+name: portable desktop builds
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: Conversation-Reclaim-Windows-x64
+            package: dist/Conversation-Reclaim-Windows-x64.zip
+          - os: macos-15
+            artifact: Conversation-Reclaim-macOS-arm64
+            package: dist/Conversation-Reclaim-macOS-arm64.zip
+          - os: macos-15-intel
+            artifact: Conversation-Reclaim-macOS-x64
+            package: dist/Conversation-Reclaim-macOS-x64.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install build tools
+        run: python -m pip install -r requirements-build.txt
+      - name: Build native app
+        run: python packaging/build.py
+      - name: Smoke test Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '& "dist/Conversation Reclaim.exe" --smoke-test; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
+      - name: Smoke test macOS application
+        if: runner.os == 'macOS'
+        run: '"dist/Conversation Reclaim.app/Contents/MacOS/Conversation Reclaim" --smoke-test'
+      - name: Package Windows portable executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "dist/Conversation Reclaim.exe" -DestinationPath "${{ matrix.package }}"
+      - name: Package macOS application
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent "dist/Conversation Reclaim.app" "${{ matrix.package }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.package }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish portable packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" artifacts/*.zip --generate-notes --verify-tag

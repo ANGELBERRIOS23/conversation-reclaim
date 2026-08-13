@@ -1,4 +1,5 @@
 import io
+import plistlib
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -27,6 +28,23 @@ class GuiScanTests(unittest.TestCase):
         self.assertEqual(categories[0]["bytes"], 120)
         self.assertEqual(categories[3]["bytes"], 430)
         self.assertTrue(all(c["selected"] for c in categories))
+
+    def test_macos_app_bundle_has_valid_launcher_metadata(self):
+        root = Path(__file__).resolve().parents[1]
+        info_path = root / "Conversation Reclaim.app" / "Contents" / "Info.plist"
+        executable = (root / "Conversation Reclaim.app" / "Contents" /
+                      "MacOS" / "ConversationReclaim")
+        with info_path.open("rb") as stream:
+            info = plistlib.load(stream)
+        self.assertEqual(info["CFBundlePackageType"], "APPL")
+        self.assertEqual(info["CFBundleExecutable"], executable.name)
+        self.assertTrue(executable.exists())
+
+    def test_smoke_mode_does_not_open_a_window(self):
+        with mock.patch.object(gui, "scan_categories", return_value=[{}] * 5), \
+             mock.patch.object(gui.tk, "Tk") as tk_root:
+            self.assertEqual(gui.main(["--smoke-test"]), 0)
+        tk_root.assert_not_called()
 
 
 class GuiApplyTests(unittest.TestCase):
