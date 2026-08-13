@@ -3,8 +3,8 @@ name: conversation-reclaim
 description: >-
   Escanea y libera espacio acumulado por conversaciones de Claude Code, Codex,
   OpenCode, Antigravity/Gemini y Command Code. Recorta contenido anterior a la
-  última compactación, elimina caches, browser recordings y transcripts de
-  subagentes cerrados, ofrece respaldo opcional y registra cambios. Usar cuando
+  última compactación, elimina caches, browser recordings, medios temporales
+  opcionales y transcripts de subagentes cerrados, ofrece respaldo opcional y registra cambios. Usar cuando
   el usuario pida limpiar conversaciones, liberar espacio de agentes, revisar
   cuánto ocupan, eliminar compactaciones anteriores o encontrar skills duplicadas.
 ---
@@ -23,6 +23,12 @@ CLI Python sin dependencias externas.
    - Los transcripts de subagentes son artefactos de un solo uso. El CLI borra
      únicamente hijos cerrados y preserva los activos.
    - OpenCode elimina todos sus snapshots locales, además de tool-output/logs.
+   - Los adjuntos temporales son opcionales: solo `codex-clipboard-*` y
+     `tempmediaStorage` de más de siete días. Avisar que una vista previa
+     antigua puede desaparecer; preservar archivos recientes o abiertos.
+   - La limpieza no cambia facturación, cargos ni uso remoto. Sí puede reducir
+     el historial que herramientas como ccusage calculan desde logs locales;
+     sugerir exportarlo antes si esas métricas importan.
 3. Aplicar solo después de que el usuario autorice la limpieza. Ofrecer
    `--backup-dir`; es opcional para `apply` y obligatorio para `apply-db`, salvo
    aceptación explícita mediante `--no-backup`.
@@ -37,7 +43,8 @@ CLI Python sin dependencias externas.
 | `python3 reclaim.py skills` | Lista skills y duplicados; nunca los elimina. |
 | `python3 reclaim.py apply` | Limpia y escribe manifiesto sin respaldo externo. |
 | `python3 reclaim.py apply --backup-dir <ruta>` | Respalda todos los targets antes de limpiar. |
-| `python3 reclaim.py apply --only claude\|codex\|opencode\|antigravity\|caches` | Limita la limpieza. |
+| `python3 reclaim.py apply --only claude\|codex\|opencode\|antigravity\|caches\|media` | Limita la limpieza. |
+| `python3 reclaim.py apply --include-media` | Incluye adjuntos temporales antiguos; desactivado por defecto. |
 | `python3 reclaim.py apply --no-antigravity-steps` | Omite la poda de DB de Antigravity. |
 | `python3 reclaim.py apply-db --backup-dir <ruta>` | Poda transaccional de `opencode.db`. |
 | `python3 reclaim.py apply-db --no-backup` | Poda irreversible aceptando el riesgo. |
@@ -73,6 +80,10 @@ CLI Python sin dependencias externas.
 - **Antigravity:** recortar transcripts estructuralmente, podar pasos anteriores
   al último `step_type=98`, omitir DB abiertas y limpiar logs, crashes, cache,
   scratch y browser recordings con aviso previo.
+- **Medios temporales:** aceptar solo archivos regulares no symlink, cerrados y
+  con más de siete días. En Codex, únicamente `codex-clipboard-*` del temporal
+  del sistema; en Antigravity, imágenes bajo `.tempmediaStorage` o
+  `tempmediaStorage`. No recorrer imágenes generales de brain/proyectos.
 - **Command Code:** solo escanear/respaldar hasta conocer un marcador seguro.
 
 ## Interfaz visual
