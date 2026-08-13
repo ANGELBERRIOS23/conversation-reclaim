@@ -34,6 +34,17 @@ intact. Then it cleans the other disposable data: snapshots, tool-outputs,
 logs, caches, browser recordings and closed subagent transcripts. It previews
 these destructive categories first; a full external backup is optional.
 
+## Native desktop preview
+
+| macOS | Windows 10/11 |
+|---|---|
+| ![Conversation Reclaim demo on macOS](docs/screenshots/macos-demo.png) | ![Conversation Reclaim preview on Windows](docs/screenshots/windows-demo.png) |
+
+The values shown are clearly labeled demonstration data; the installed app
+calculates the real reclaimable space locally. The macOS image is based on the
+native app, while the Windows image is a platform-frame preview pending a real
+Windows capture from the published build.
+
 ## Designed for AI agents — and for humans
 
 Three ways to use it:

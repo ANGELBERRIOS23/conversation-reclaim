@@ -35,6 +35,17 @@ intactos. Después limpia datos desechables: snapshots, tool-outputs, logs,
 caches, grabaciones del browser y transcripts de subagentes cerrados. Antes
 muestra estas categorías destructivas; el respaldo externo completo es opcional.
 
+## Vista previa de la aplicación nativa
+
+| macOS | Windows 10/11 |
+|---|---|
+| ![Demostración de Conversation Reclaim en macOS](docs/screenshots/macos-demo.png) | ![Vista previa de Conversation Reclaim en Windows](docs/screenshots/windows-demo.png) |
+
+Los valores están identificados como datos de demostración; la app instalada
+calcula localmente el espacio real. La imagen de macOS se basa en la aplicación
+nativa y la de Windows es una vista previa con el marco de esa plataforma,
+pendiente de sustituirse por una captura real del build publicado.
+
 ## Pensada para agentes de IA — y para humanos
 
 Tres formas de usarla:
