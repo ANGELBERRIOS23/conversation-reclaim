@@ -70,4 +70,5 @@ jobs:
       - name: Publish portable packages
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: gh release create "$GITHUB_REF_NAME" artifacts/*.zip --generate-notes --verify-tag
