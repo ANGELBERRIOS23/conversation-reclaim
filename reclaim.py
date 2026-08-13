@@ -706,9 +706,15 @@ def apply_claude():
         sub_bytes += p.stat().st_size
         sub_n += 1
         p.unlink()
-        for meta in (Path(str(p) + ".meta.json"),):
-            if meta.exists():
-                meta.unlink()
+        meta = p.with_name(p.name.replace(".jsonl", "") + ".meta.json")
+        if meta.exists():
+            meta.unlink()
+    for meta in base.rglob("subagents/agent-*.meta.json"):
+        if "acompact" in meta.name:
+            continue
+        sub_bytes += meta.stat().st_size
+        sub_n += 1
+        meta.unlink()
     for wf in base.rglob("subagents/workflows"):
         sub_bytes += dir_size(wf)
         shutil.rmtree(wf)

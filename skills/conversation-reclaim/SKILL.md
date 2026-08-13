@@ -49,7 +49,13 @@ mitad, el original queda intacto. Para `apply-db` el respaldo es obligatorio
 ## Qué limpia `apply` por herramienta
 
 - **Claude Code / Codex**: recorta cada conversación compactada hasta su último
-  marcador (resumen + reciente se conservan).
+  marcador (resumen + reciente se conservan). En Claude Code además **elimina
+  los transcripts de subagentes hijos** (`subagents/agent-*.jsonl` y sus
+  `.meta.json`, de un solo uso) conservando los `agent-acompact` (resúmenes de
+  compactación) y `memory/`. **Nota: preferible correr sin Claude abierto y sin
+  conversaciones de subagentes activas** — si Claude está corriendo, `apply`
+  se omite (check con lsof); si hubiera una sesión de subagente activa, su
+  transcript se borraría (es de un solo uso, pero mejor evitarlo).
 - **OpenCode (archivos)**: snapshots huérfanos, tool-output y logs.
 - **OpenCode (DB)**: `apply-db` — eventos de streaming redundantes +
   pre-compactación + VACUUM (requiere opencode cerrado).
