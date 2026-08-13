@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Conversation Reclaim",
-  "version": "3.0.2",
+  "version": "3.1.0",
   "identifier": "com.aberrios.conversation-reclaim",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -32,6 +32,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -42,6 +43,25 @@
     "category": "Utility",
     "shortDescription": "Safely reclaim AI conversation storage",
     "longDescription": "A native desktop utility that finds and safely removes regenerable or compacted AI assistant data.",
-    "copyright": "Copyright © 2026 Angel Berrios"
+    "copyright": "Copyright © 2026 Angel Berrios",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    },
+    "macOS": {
+      "signingIdentity": "-"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQyNUZEQzE2NTMwMkVBRTkKUldUcDZnSlRGdHhmMGlMcW44eFBXSy83MHp2cis4eW4wMmZ5VXJId0lOSENtQVRCc0d3clRHSFMK",
+      "endpoints": [
+        "https://github.com/ANGELBERRIOS23/conversation-reclaim/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

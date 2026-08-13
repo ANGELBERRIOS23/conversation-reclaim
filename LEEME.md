@@ -56,17 +56,23 @@ Tres formas de usarla:
 ### Opciones de descarga
 
 Los [Releases de GitHub](https://github.com/ANGELBERRIOS23/conversation-reclaim/releases)
-pueden ofrecer tres descargas autocontenidas generadas por GitHub Actions:
+ofrecen descargas nativas generadas por GitHub Actions:
 
-- **Windows x64 portable:** descomprime y abre `Conversation Reclaim.exe`.
+- **Windows x64 Setup (recomendado):** instala la app y habilita las
+  actualizaciones automáticas firmadas.
+- **Windows x64 portable:** descomprime y ejecútalo sin instalar. Usa Setup si
+  quieres actualizaciones transparentes.
 - **macOS Apple Silicon:** descomprime el paquete `macOS-arm64` y abre la app.
 - **macOS Intel:** descomprime el paquete `macOS-x64` y abre la app.
 
 Esos paquetes contienen la aplicación React/Rust ya compilada: el usuario no
 instala Python ni ninguna dependencia. Un build de desarrollo
 sin certificado puede requerir **clic derecho → Abrir** en macOS o confirmar
-Windows SmartScreen. Cada tag `v*` crea los tres paquetes y los adjunta al
-Release; el workflow también se puede ejecutar manualmente.
+Windows SmartScreen. La app revisa el Release más reciente de GitHub al abrir;
+si hay una actualización la muestra en Protección y solo la instala cuando el
+usuario elige **Instalar y reiniciar**. Cada actualización se firma y verifica
+criptográficamente antes de instalarse. Cada tag `v*` crea los paquetes
+nativos, el índice del actualizador y sus firmas, y los adjunta al Release.
 
 ```bash
 python3 reclaim.py scan                    # estimación de solo lectura
@@ -147,9 +153,10 @@ esos eventos redundantes, luego poda los mensajes pre-compactación y hace
 
 ## Notas de Windows: cómo encontrar qué limpiar
 
-Windows **aún no está probado** — ayuda bienvenida. La herramienta ya resuelve
-las rutas correctas, y aquí está dónde vive cada cosa en Windows para que
-puedas verificar a mano:
+La app apunta a **Windows 10 de 64 bits, versión 1803 o posterior**, y Windows
+11. Tauri utiliza Microsoft Edge WebView2, distribuido con esas versiones de
+Windows. Las rutas de limpieza todavía necesitan más pruebas reales, así que
+la experiencia de usuarios de Windows sigue siendo bienvenida:
 
 | Qué | Ruta en Windows |
 |---|---|

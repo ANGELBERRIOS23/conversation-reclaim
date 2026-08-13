@@ -1,4 +1,4 @@
-name: portable desktop builds
+name: desktop builds and releases
 
 on:
   workflow_dispatch:
@@ -17,13 +17,10 @@ jobs:
         include:
           - os: windows-latest
             artifact: Conversation-Reclaim-Windows-x64
-            package: artifacts/Conversation-Reclaim-Windows-x64.zip
           - os: macos-15
             artifact: Conversation-Reclaim-macOS-arm64
-            package: artifacts/Conversation-Reclaim-macOS-arm64.zip
           - os: macos-15-intel
             artifact: Conversation-Reclaim-macOS-x64
-            package: artifacts/Conversation-Reclaim-macOS-x64.zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -38,29 +35,43 @@ jobs:
         run: |
           npm run build
           cargo test --manifest-path src-tauri/Cargo.toml
-      - name: Build Windows portable executable
+      - name: Build Windows installer and portable executable
         if: runner.os == 'Windows'
-        run: npm run tauri build -- --no-bundle
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: npm run tauri build -- --bundles nsis
       - name: Build macOS application
         if: runner.os == 'macOS'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: npm run tauri build -- --bundles app
-      - name: Package Windows portable executable
+      - name: Package Windows editions
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force artifacts
-          Compress-Archive -Path "src-tauri/target/release/conversation-reclaim.exe" -DestinationPath "${{ matrix.package }}"
-      - name: Package macOS application
+          $setup = Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          if (-not $setup) { throw "NSIS installer not found" }
+          Copy-Item $setup.FullName "artifacts/Conversation-Reclaim-Windows-x64-Setup.exe"
+          Copy-Item "$($setup.FullName).sig" "artifacts/Conversation-Reclaim-Windows-x64-Setup.exe.sig"
+          Compress-Archive -Path "src-tauri/target/release/conversation-reclaim.exe" -DestinationPath "artifacts/Conversation-Reclaim-Windows-x64-Portable.zip"
+      - name: Package macOS edition
         if: runner.os == 'macOS'
+        shell: bash
         run: |
           mkdir -p artifacts
+          if [[ "${{ matrix.artifact }}" == *"arm64" ]]; then ARCH="arm64"; else ARCH="x64"; fi
           codesign --force --deep --sign - "src-tauri/target/release/bundle/macos/Conversation Reclaim.app"
           codesign --verify --deep --strict "src-tauri/target/release/bundle/macos/Conversation Reclaim.app"
-          ditto -c -k --sequesterRsrc --keepParent "src-tauri/target/release/bundle/macos/Conversation Reclaim.app" "${{ matrix.package }}"
+          ditto -c -k --sequesterRsrc --keepParent "src-tauri/target/release/bundle/macos/Conversation Reclaim.app" "artifacts/Conversation-Reclaim-macOS-$ARCH.zip"
+          UPDATER_ARCHIVE=$(find src-tauri/target/release/bundle/macos -name '*.app.tar.gz' -type f -print -quit)
+          test -n "$UPDATER_ARCHIVE"
+          cp "$UPDATER_ARCHIVE" "artifacts/Conversation-Reclaim-macOS-$ARCH.app.tar.gz"
+          cp "$UPDATER_ARCHIVE.sig" "artifacts/Conversation-Reclaim-macOS-$ARCH.app.tar.gz.sig"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.package }}
+          path: artifacts/*
           if-no-files-found: error
 
   release:
@@ -70,12 +81,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
-      - name: Publish portable packages
+      - name: Generate signed updater index
+        run: node scripts/generate-latest-json.mjs artifacts
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+      - name: Publish native desktop release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" artifacts/*.zip --generate-notes --verify-tag
+        run: gh release create "$GITHUB_REF_NAME" artifacts/* --generate-notes --verify-tag --title "Conversation Reclaim $GITHUB_REF_NAME"

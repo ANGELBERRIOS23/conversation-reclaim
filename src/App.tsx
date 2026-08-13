@@ -40,6 +40,12 @@ type ApplyResult = {
   warnings: string[];
 };
 
+type UpdateInfo = {
+  version: string;
+  currentVersion: string;
+  notes?: string;
+};
+
 const copy = {
   es: {
     product: "Conversation Reclaim",
@@ -91,6 +97,14 @@ const copy = {
     manifestRuleBody: "Cada cambio queda documentado con su ruta, tamaño y resultado.",
     atomicRule: "Cambios seguros",
     atomicRuleBody: "Los recortes se preparan por separado y solo reemplazan el original al terminar correctamente.",
+    updates: "Actualizaciones",
+    updateBody: "Conversation Reclaim comprueba GitHub de forma segura y verifica la firma antes de instalar.",
+    checkUpdates: "Buscar actualizaciones",
+    checkingUpdates: "Buscando…",
+    upToDate: "Tienes la versión más reciente",
+    updateAvailable: "Nueva versión disponible",
+    installUpdate: "Instalar y reiniciar",
+    installingUpdate: "Instalando…",
   },
   en: {
     product: "Conversation Reclaim",
@@ -142,6 +156,14 @@ const copy = {
     manifestRuleBody: "Every change records its path, size, and outcome.",
     atomicRule: "Safe changes",
     atomicRuleBody: "Trims are prepared separately and replace the original only after completing successfully.",
+    updates: "Updates",
+    updateBody: "Conversation Reclaim securely checks GitHub and verifies the signature before installing.",
+    checkUpdates: "Check for updates",
+    checkingUpdates: "Checking…",
+    upToDate: "You have the latest version",
+    updateAvailable: "New version available",
+    installUpdate: "Install and restart",
+    installingUpdate: "Installing…",
   },
 };
 
@@ -179,6 +201,9 @@ export default function App() {
   const [error, setError] = useState("");
   const [page, setPage] = useState<Page>("overview");
   const [languageOpen, setLanguageOpen] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<"idle" | "checking" | "current" | "available" | "installing" | "error">("idle");
+  const [availableUpdate, setAvailableUpdate] = useState<UpdateInfo | null>(null);
+  const [updateError, setUpdateError] = useState("");
   const t = copy[lang];
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 
@@ -197,7 +222,39 @@ export default function App() {
     }
   };
 
-  useEffect(() => { void runScan(); }, []);
+  const checkUpdates = async (showResult = true) => {
+    if (!isTauri()) return;
+    setUpdateStatus("checking");
+    setUpdateError("");
+    try {
+      const update = await invoke<UpdateInfo | null>("check_for_update");
+      setAvailableUpdate(update);
+      setUpdateStatus(update ? "available" : "current");
+    } catch (cause) {
+      if (showResult) {
+        setUpdateError(String(cause));
+        setUpdateStatus("error");
+      } else {
+        setUpdateStatus("idle");
+      }
+    }
+  };
+
+  const installAvailableUpdate = async () => {
+    setUpdateStatus("installing");
+    setUpdateError("");
+    try {
+      await invoke("install_update");
+    } catch (cause) {
+      setUpdateError(String(cause));
+      setUpdateStatus("error");
+    }
+  };
+
+  useEffect(() => {
+    void runScan();
+    if (isTauri()) window.setTimeout(() => void checkUpdates(false), 1200);
+  }, []);
 
   const selectedBytes = useMemo(() => scan?.categories
     .filter((item) => selected.has(item.key))
@@ -244,6 +301,7 @@ export default function App() {
           <button className={`nav-item ${page === "protection" ? "active" : ""}`} onClick={() => setPage("protection")}><ShieldCheck size={18} />{t.navSafety}</button>
         </nav>
         <div className="sidebar-bottom">
+          {updateStatus === "available" && availableUpdate && <button className="update-chip" onClick={() => setPage("protection")}><RefreshCw size={14} /><span>{t.updateAvailable}</span><strong>v{availableUpdate.version}</strong></button>}
           <div className="language-picker">
             <button className="language-trigger" onClick={() => setLanguageOpen((open) => !open)} aria-haspopup="listbox" aria-expanded={languageOpen}>
               <Languages size={16} /><span>{lang === "es" ? "Español" : "English"}</span><ChevronDown className={languageOpen ? "open" : ""} size={14} />
@@ -321,6 +379,10 @@ export default function App() {
             <article className="protection-card"><span><ShieldCheck size={21} /></span><h2>{t.atomicRule}</h2><p>{t.atomicRuleBody}</p></article>
           </section>
           <section className="safety-card"><div className="safety-icon"><ShieldCheck size={22} /></div><div><h3>{t.safetyTitle}</h3><p>{t.safetyBody}</p></div><details><summary>{t.advanced}<CircleHelp size={15} /></summary><p>{t.advancedBody}</p></details></section>
+          <section className="update-card">
+            <div className="update-copy"><span><RefreshCw size={20} /></span><div><h2>{t.updates}</h2><p>{t.updateBody}</p>{availableUpdate && <small>v{availableUpdate.currentVersion} → v{availableUpdate.version}</small>}{updateStatus === "current" && <small className="success-text"><Check size={13} />{t.upToDate}</small>}{updateStatus === "error" && <small className="error-text">{updateError}</small>}</div></div>
+            {updateStatus === "available" ? <button className="primary-button" onClick={installAvailableUpdate}><RefreshCw size={16} />{t.installUpdate}</button> : <button className="secondary-button" onClick={() => void checkUpdates(true)} disabled={updateStatus === "checking" || updateStatus === "installing"}><RefreshCw className={updateStatus === "checking" ? "spin" : ""} size={16} />{updateStatus === "checking" ? t.checkingUpdates : updateStatus === "installing" ? t.installingUpdate : t.checkUpdates}</button>}
+          </section>
         </div>}
       </main>
 
