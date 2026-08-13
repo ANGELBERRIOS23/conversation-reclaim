@@ -1,0 +1,136 @@
+# conversation-reclaim
+
+*[Versión en español](LEEME.md)*
+
+> **Tested on macOS.** Linux should work. **Windows: NOT tested yet** — the
+> tool is multi-platform by design and includes path detection for Windows,
+> but if you run it there you are the pioneer. See
+> [Windows notes](#windows-notes-how-to-find-what-to-clean).
+
+Reclaim the disk space your AI conversations silently eat — **without breaking
+them**.
+
+Every AI coding agent keeps a full copy of every conversation on disk. When a
+conversation hits the context limit it gets **compacted**: the model summarizes
+everything so far into a few paragraphs and keeps going. But the original
+content is **never deleted** — it stays on disk, useless, waiting for a resume
+that will only load the summary and the latest messages.
+
+```
+1 → 100 (full conversation)          compacted → summary A
+1 → 100 (full conversation)          compacted → summary B (includes A)
+1 → 100 (full conversation)          compacted → summary C (includes B)
+```
+
+That was a 776 MB conversation we found — of which **774 MB was pre-compaction
+garbage**. And it's not only compactions: OpenCode keeps an event log where
+every streaming update stores a full copy of the message (one session reached
+**4.7 GB** of redundant events), Antigravity leaves gigabytes of browser-mode
+screenshots, and agents copy the same skills into four different folders.
+
+This tool detects the **last compaction marker** of every conversation and
+trims everything before it — keeping the summary and the recent messages
+intact. Then it cleans the other safe stuff: orphan snapshots, tool-outputs,
+logs, caches, browser recordings. **Always after a full backup.**
+
+## Designed for AI agents — and for humans
+
+Two ways to use it:
+
+1. **By an AI agent (recommended)** — the repo ships an agent skill
+   (`skills/conversation-reclaim/SKILL.md`). Install it and just tell your
+   agent *"libera espacio de mis conversaciones"* (or *"free up space from my
+   conversations"* — the tool speaks your language). The skill knows the
+   markers, the safety rules and the backup-first workflow. This is how the
+   author uses it.
+2. **Manually from a terminal** — a plain, single-file Python CLI (stdlib
+   only), no dependencies, no install. Run `scan` first, review the numbers,
+   then `apply` with a backup destination:
+
+```bash
+python3 reclaim.py scan                    # read-only estimate
+python3 reclaim.py apply --backup-dir /Volumes/DISCO/respaldos-ia
+python3 reclaim.py apply --only antigravity   # one tool only
+python3 reclaim.py apply-db                # prune opencode.db (opencode must be closed)
+python3 reclaim.py skills                  # list skills + find duplicates
+python3 reclaim.py restore --backup-dir /ruta
+```
+
+Language: the output follows `$RECLAIM_LANG`, then `$LANG`, or use
+`--lang es|en`. Ask the tool in Spanish and it answers in Spanish; ask in
+English and it answers in English.
+
+## What it cleans, per tool
+
+| Tool | Storage | Compaction marker | What `apply` does |
+|---|---|---|---|
+| **Claude Code** | `~/.claude/projects/**/*.jsonl` | line with `Conversation compacted` / `compactMetadata` | trims everything before the last marker |
+| **Codex** | `~/.codex/sessions/**/rollout-*.jsonl` | event `"type":"compacted"` | same |
+| **OpenCode** | `~/.local/share/opencode/opencode.db` | part `type=compaction` with `tail_start_id` | `apply-db`: redundant streaming events + pre-compaction messages + VACUUM |
+| **OpenCode (files)** | `snapshot/`, `tool-output/`, `log/` | — | orphan snapshots, tool outputs, logs |
+| **Antigravity / Gemini** | `~/.gemini/antigravity{,,-cli,-ide}/conversations/*.db` | steps `step_type 98` (CONVERSATION_HISTORY) | prunes pre-compaction steps + transcripts, scratch, logs, caches, `browser_recordings` |
+| **Command Code** | `~/.commandcode/projects/` | none detected | scan/backup only |
+
+## The OpenCode database problem (opencode-db-prune, integrated)
+
+OpenCode's `opencode.db` event-sources every message: each streaming update
+writes a full snapshot of the part. A long session generates hundreds of
+thousands of rows of pure duplication — in our case 147k rows / **4.4 GB** of a
+4.9 GB database, 90%+ redundancy. `apply-db` removes those redundant events,
+then prunes pre-compaction messages, then `VACUUM`s. This is a merge of the
+dedicated [opencode-db-prune](https://github.com/ANGELBERRIOS23/opencode-db-prune)
+project (use it directly if you only care about the DB).
+
+## Safety
+
+- **Backup first, always.** `apply` copies everything it will touch to
+  `--backup-dir` (external disk recommended) before changing a single byte.
+- Refuses to touch `opencode.db` while opencode is running.
+- Pre-flight check: won't delete events if the content only lives in the event
+  table.
+- Integrity checks (`PRAGMA integrity_check`) after DB operations.
+- Antigravity conversation DBs are skipped if the app has them open.
+- Skills are **only listed**, never deleted (duplicates can be deduplicated
+  with symlinks).
+- Caches (tool-output, logs, snapshots, scratch) are safe to delete — prompt
+  caching lives on the server, it does not cost tokens.
+
+## Windows notes: how to find what to clean
+
+Windows is **not tested yet** — help welcome. The tool already resolves the
+right paths, and here is where each thing lives on Windows so you can verify
+manually:
+
+| What | Windows path |
+|---|---|
+| Claude Code conversations | `%USERPROFILE%\.claude\projects\<proyecto>\<uuid>.jsonl` |
+| Codex sessions | `%USERPROFILE%\.codex\sessions\<año>\<mes>\<día>\rollout-*.jsonl` |
+| OpenCode database | `%USERPROFILE%\.local\share\opencode\opencode.db` (also `%LOCALAPPDATA%\opencode\data` or `%APPDATA%\opencode`) |
+| OpenCode snapshots / tool-output / logs | same directory as the DB |
+| Antigravity / Gemini | `%USERPROFILE%\.gemini\antigravity{,,-cli,-ide}\...` |
+| Antigravity desktop logs | `%APPDATA%\Antigravity\logs` and `%APPDATA%\Antigravity IDE\logs` |
+| Command Code | `%USERPROFILE%\.commandcode\projects` |
+| Skills | `%USERPROFILE%\.claude\skills`, `%USERPROFILE%\.config\opencode\skills`, `%USERPROFILE%\.agents\skills` |
+
+Notes for Windows users:
+
+- **`apply-db` cannot auto-detect an open database on Windows** (no `lsof`);
+  make sure opencode is fully closed before running it.
+- The JSONL truncation works exactly the same: the file is rewritten from the
+  last compaction marker onward.
+- Antigravity paths under `%USERPROFILE%\.gemini` are the same on Windows.
+- If you find a path that differs, open an issue or a PR — the project wants
+  to be truly cross-platform.
+
+## Verified results (macOS, author's machine)
+
+- Claude Code: 1.8 GB → 355 MB (one conversation was 776 MB, 774 MB of it
+  pre-compaction garbage).
+- OpenCode DB: 4.9 GB with 4.7 GB of redundant events (147k rows).
+- Antigravity/Gemini: 19 GB → 4.6 GB (conversation pruning + browser
+  recordings + backups the user no longer needed).
+- Skills: 12 duplicates found across 5 skill roots (~17 MB, dedup via symlinks).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
