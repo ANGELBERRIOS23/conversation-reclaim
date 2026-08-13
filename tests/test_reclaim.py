@@ -348,6 +348,28 @@ class OpenCodeTests(unittest.TestCase):
             self.assertTrue(reclaim.close_opencode_for_cleanup("/tmp/opencode.db"))
         run.assert_called_once()
 
+    def test_windows_close_requests_normal_window_close(self):
+        users = [{"pid": 4321, "command": "OpenCode"}]
+        with mock.patch.object(reclaim, "_IS_WIN", True), \
+             mock.patch.object(reclaim, "database_users", return_value=users), \
+             mock.patch.object(reclaim, "process_is_current_ancestor", return_value=False), \
+             mock.patch.object(reclaim, "_request_windows_process_close",
+                               return_value={4321}) as request_close, \
+             mock.patch.object(reclaim, "database_in_use", return_value=False), \
+             redirect_stdout(io.StringIO()):
+            self.assertTrue(reclaim.close_opencode_for_cleanup("C:/opencode.db"))
+        request_close.assert_called_once()
+
+    def test_windows_close_refuses_unknown_database_holder(self):
+        users = [{"pid": 4321, "command": "BackupService"}]
+        with mock.patch.object(reclaim, "_IS_WIN", True), \
+             mock.patch.object(reclaim, "database_users", return_value=users), \
+             mock.patch.object(reclaim, "process_is_current_ancestor", return_value=False), \
+             mock.patch.object(reclaim, "_request_windows_process_close") as request_close, \
+             redirect_stdout(io.StringIO()):
+            self.assertFalse(reclaim.close_opencode_for_cleanup("C:/opencode.db"))
+        request_close.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

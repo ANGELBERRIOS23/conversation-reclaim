@@ -128,7 +128,9 @@ esos eventos redundantes, luego poda los mensajes pre-compactación y hace
   manuales de respaldo).
 - `apply-db` exige un respaldo explícito (`--backup-dir`) o `--no-backup`.
 - Refusa tocar `opencode.db` mientras opencode esté corriendo.
-- `--close-opencode` avisa y solicita el cierre normal de la app en macOS. Se
+- `--close-opencode` avisa y solicita el cierre normal de la app en macOS o
+  Windows. En Windows usa Restart Manager para identificar los PID exactos y
+  envía `WM_CLOSE`; nunca usa `taskkill` forzado. Se
   niega si OpenCode es el anfitrión/ancestro del comando actual, para no matar
   al agente que ejecuta la limpieza. Ejecutarlo desde Terminal, Codex u otro
   harness externo.
@@ -171,9 +173,10 @@ la experiencia de usuarios de Windows sigue siendo bienvenida:
 
 Notas para usuarios de Windows:
 
-- La detección usa la API nativa de archivos compartidos de Windows, así que
-  omite historiales activos sin depender de `lsof`. Cierra OpenCode manualmente
-  antes de `apply-db`; el cierre automático por ahora es solo para macOS.
+- La detección usa Restart Manager y la API nativa de archivos compartidos de
+  Windows, así que identifica los PID y omite historiales activos sin depender
+  de `lsof`. `--close-opencode` puede pedir el cierre normal de la ventana, pero
+  rechaza procesos desconocidos y nunca fuerza su terminación.
 - El recorte de JSONL funciona exactamente igual: el archivo se reescribe desde
   el último marcador de compactación.
 - Las rutas de Antigravity bajo `%USERPROFILE%\.gemini` son las mismas en

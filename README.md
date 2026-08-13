@@ -126,7 +126,9 @@ project (use it directly if you only care about the DB).
   run leaves originals intact — see the skill for manual fallback recipes).
 - `apply-db` requires an explicit backup (`--backup-dir`) or `--no-backup`.
 - Refuses to touch `opencode.db` while opencode is running.
-- `--close-opencode` warns and requests a normal macOS app quit before pruning.
+- `--close-opencode` warns and requests a normal app quit before pruning on
+  macOS and Windows. Windows uses Restart Manager to identify the exact holders
+  and sends `WM_CLOSE`; it never uses forced `taskkill`.
   It refuses when OpenCode is an ancestor/host of the running command, so it
   never terminates the agent executing the cleanup. Run that command from
   Terminal, Codex or another external harness.
@@ -170,8 +172,9 @@ testing, so feedback from Windows users is welcome:
 Notes for Windows users:
 
 - Open-file detection uses the native Windows file-sharing API, so active
-  histories are skipped even without `lsof`. Close OpenCode manually before
-  `apply-db`; automatic app quit is currently macOS-only.
+  histories are skipped even without `lsof`. Restart Manager reports the exact
+  processes holding `opencode.db`; `--close-opencode` can request a normal
+  OpenCode window close but refuses unknown holders and never force-kills.
 - The JSONL truncation works exactly the same: the file is rewritten from the
   last compaction marker onward.
 - Antigravity paths under `%USERPROFILE%\.gemini` are the same on Windows.

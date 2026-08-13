@@ -676,13 +676,100 @@ def database_in_use(path):
     return None if users is None else bool(users)
 
 
+def _windows_file_users(path):
+    """Identifica procesos que usan path mediante Windows Restart Manager."""
+    import ctypes
+    from ctypes import wintypes
+
+    class RM_UNIQUE_PROCESS(ctypes.Structure):
+        _fields_ = [("dwProcessId", wintypes.DWORD),
+                    ("ProcessStartTime", wintypes.FILETIME)]
+
+    class RM_PROCESS_INFO(ctypes.Structure):
+        _fields_ = [
+            ("Process", RM_UNIQUE_PROCESS),
+            ("strAppName", wintypes.WCHAR * 256),
+            ("strServiceShortName", wintypes.WCHAR * 64),
+            ("ApplicationType", wintypes.DWORD),
+            ("AppStatus", wintypes.ULONG),
+            ("TSSessionId", wintypes.DWORD),
+            ("bRestartable", wintypes.BOOL),
+        ]
+
+    manager = ctypes.WinDLL("rstrtmgr", use_last_error=True)
+    manager.RmStartSession.argtypes = [ctypes.POINTER(wintypes.DWORD),
+                                       wintypes.DWORD, wintypes.LPWSTR]
+    manager.RmStartSession.restype = wintypes.DWORD
+    manager.RmRegisterResources.argtypes = [
+        wintypes.DWORD, wintypes.UINT, ctypes.POINTER(wintypes.LPCWSTR),
+        wintypes.UINT, ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p]
+    manager.RmRegisterResources.restype = wintypes.DWORD
+    manager.RmGetList.argtypes = [
+        wintypes.DWORD, ctypes.POINTER(wintypes.UINT),
+        ctypes.POINTER(wintypes.UINT), ctypes.POINTER(RM_PROCESS_INFO),
+        ctypes.POINTER(wintypes.DWORD)]
+    manager.RmGetList.restype = wintypes.DWORD
+    manager.RmEndSession.argtypes = [wintypes.DWORD]
+    manager.RmEndSession.restype = wintypes.DWORD
+    session = wintypes.DWORD()
+    key = ctypes.create_unicode_buffer(33)
+    if manager.RmStartSession(ctypes.byref(session), 0, key) != 0:
+        return None
+    try:
+        resources = (wintypes.LPCWSTR * 1)(str(Path(path).resolve()))
+        result = manager.RmRegisterResources(
+            session, 1, resources, 0, None, 0, None)
+        if result != 0:
+            return None
+
+        needed = wintypes.UINT(0)
+        count = wintypes.UINT(0)
+        reboot_reasons = wintypes.DWORD(0)
+        result = manager.RmGetList(
+            session, ctypes.byref(needed), ctypes.byref(count), None,
+            ctypes.byref(reboot_reasons))
+        if result == 0 and needed.value == 0:
+            return []
+        if result != 234 or needed.value == 0:  # ERROR_MORE_DATA
+            return None
+
+        entries = (RM_PROCESS_INFO * needed.value)()
+        count.value = needed.value
+        result = manager.RmGetList(
+            session, ctypes.byref(needed), ctypes.byref(count), entries,
+            ctypes.byref(reboot_reasons))
+        if result != 0:
+            return None
+        return [
+            {"pid": int(entry.Process.dwProcessId),
+             "command": entry.strAppName or entry.strServiceShortName or "proceso de Windows"}
+            for entry in entries[:count.value]
+        ]
+    finally:
+        manager.RmEndSession(session)
+
+
 def database_users(path):
     """Lista procesos que tienen abierto un archivo, o None si no es verificable."""
     if _IS_WIN:
         try:
+            users = _windows_file_users(path)
+            if users is not None:
+                return users
             import ctypes
             from ctypes import wintypes
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD,
+                                                          wintypes.DWORD]
+            kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+            kernel32.Process32FirstW.argtypes = [
+                wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+            kernel32.Process32FirstW.restype = wintypes.BOOL
+            kernel32.Process32NextW.argtypes = [
+                wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+            kernel32.Process32NextW.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
             create_file = kernel32.CreateFileW
             create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
                                     wintypes.DWORD, wintypes.LPVOID,
@@ -720,6 +807,52 @@ def database_users(path):
 
 def process_is_current_ancestor(candidate_pid):
     """True si cerrar candidate_pid podría matar este propio proceso."""
+    if not isinstance(candidate_pid, int) or candidate_pid <= 0:
+        return None
+    if _IS_WIN:
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class PROCESSENTRY32W(ctypes.Structure):
+                _fields_ = [
+                    ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", wintypes.LONG),
+                    ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", wintypes.WCHAR * 260),
+                ]
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            snapshot = kernel32.CreateToolhelp32Snapshot(0x2, 0)
+            if snapshot == ctypes.c_void_p(-1).value:
+                return None
+            parents = {}
+            try:
+                entry = PROCESSENTRY32W()
+                entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+                ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+                while ok:
+                    parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+                    ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+            finally:
+                kernel32.CloseHandle(snapshot)
+
+            pid = os.getpid()
+            for _ in range(128):
+                if pid == candidate_pid:
+                    return True
+                if pid <= 1 or pid not in parents:
+                    return False
+                pid = parents[pid]
+            return None
+        except (AttributeError, OSError):
+            return None
+
     pid = os.getpid()
     for _ in range(64):
         if pid == candidate_pid:
@@ -738,6 +871,40 @@ def process_is_current_ancestor(candidate_pid):
     return None
 
 
+def _request_windows_process_close(pids):
+    """Solicita WM_CLOSE a las ventanas principales; nunca termina procesos."""
+    import ctypes
+    from ctypes import wintypes
+
+    targets = set(pids)
+    found = set()
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.GetWindowThreadProcessId.argtypes = [
+        wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsWindowVisible.restype = wintypes.BOOL
+    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                    wintypes.WPARAM, wintypes.LPARAM]
+    user32.PostMessageW.restype = wintypes.BOOL
+    user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+    user32.EnumWindows.restype = wintypes.BOOL
+
+    @callback_type
+    def visit_window(hwnd, _lparam):
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value in targets and user32.IsWindowVisible(hwnd):
+            found.add(int(pid.value))
+            user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+        return True
+
+    if not user32.EnumWindows(visit_window, 0):
+        return None
+    return found
+
+
 def close_opencode_for_cleanup(db):
     """Cierra OpenCode solo si no es el proceso anfitrión del propio CLI."""
     users = database_users(db)
@@ -753,16 +920,32 @@ def close_opencode_for_cleanup(db):
             print(f"  REFUSED: no se cerrará {user['command']} PID {user['pid']}; {reason}.")
             print("  Ejecuta apply-db desde Terminal, Codex u otro agente externo a OpenCode.")
             return False
-    if sys.platform != "darwin":
-        print("  REFUSED: --close-opencode solo está implementado de forma segura en macOS.")
-        return False
     names = ", ".join(f"{u['command']} PID {u['pid']}" for u in users)
     print(f"  AVISO: se cerrará OpenCode para liberar la DB ({names}).")
-    try:
-        subprocess.run(["osascript", "-e", 'tell application "OpenCode" to quit'],
-                       capture_output=True, text=True, timeout=15)
-    except (OSError, subprocess.SubprocessError):
-        pass
+    if _IS_WIN:
+        if any("opencode" not in user["command"].lower() for user in users):
+            print("  REFUSED: la DB está abierta por un proceso que no se identificó como OpenCode.")
+            return False
+        try:
+            notified = _request_windows_process_close(user["pid"] for user in users)
+        except (AttributeError, OSError):
+            notified = None
+        if notified is None:
+            print("  REFUSED: Windows no permitió solicitar el cierre normal de OpenCode.")
+            return False
+        missing = [user for user in users if user["pid"] not in notified]
+        if missing:
+            print("  REFUSED: OpenCode no expuso una ventana que pudiera cerrarse normalmente.")
+            return False
+    elif sys.platform == "darwin":
+        try:
+            subprocess.run(["osascript", "-e", 'tell application "OpenCode" to quit'],
+                           capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        print("  REFUSED: --close-opencode solo está implementado de forma segura en macOS y Windows.")
+        return False
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         state = database_in_use(db)

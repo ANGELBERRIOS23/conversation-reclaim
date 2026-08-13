@@ -66,7 +66,8 @@ CLI Python sin dependencias externas.
   ejecutar `VACUUM` e `integrity_check`. Rehusar si está abierto o si el
   contenido no está materializado fuera de `event`.
   Si está abierto, avisar y pedir autorización antes de usar
-  `--close-opencode`. Cerrar solo mediante quit normal; nunca forzar. Si el PID
+  `--close-opencode`. En Windows identificar bloqueadores mediante Restart
+  Manager y solicitar `WM_CLOSE`; en macOS usar el quit normal. Nunca forzar. Si el PID
   que mantiene la DB es ancestro/anfitrión del CLI, rehusar cerrarlo y pedir que
   se ejecute desde Terminal, Codex u otro harness externo.
 - **Antigravity:** recortar transcripts estructuralmente, podar pasos anteriores
@@ -87,8 +88,10 @@ que CLI y GUI compartan las mismas protecciones y manifiestos.
 La interfaz principal debe ser responsive, tener scroll con barra de acción
 siempre visible, Español/English persistente y respetar el estilo del sistema.
 
-En Windows, detectar archivos abiertos mediante la API nativa de file sharing.
-El cierre automático de OpenCode es solo macOS; pedir cierre manual en Windows.
+En Windows, detectar archivos abiertos y sus PID mediante Restart Manager, con
+la API nativa de file sharing como comprobación conservadora. El cierre de
+OpenCode solo puede solicitarse a una ventana identificada; nunca usar
+`taskkill /F`.
 
 ## Distribución visual
 

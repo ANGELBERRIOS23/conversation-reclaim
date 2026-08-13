@@ -61,7 +61,6 @@ jobs:
         run: |
           mkdir -p artifacts
           if [[ "${{ matrix.artifact }}" == *"arm64" ]]; then ARCH="arm64"; else ARCH="x64"; fi
-          codesign --force --deep --sign - "src-tauri/target/release/bundle/macos/Conversation Reclaim.app"
           codesign --verify --deep --strict "src-tauri/target/release/bundle/macos/Conversation Reclaim.app"
           ditto -c -k --sequesterRsrc --keepParent "src-tauri/target/release/bundle/macos/Conversation Reclaim.app" "artifacts/Conversation-Reclaim-macOS-$ARCH.zip"
           UPDATER_ARCHIVE=$(find src-tauri/target/release/bundle/macos -name '*.app.tar.gz' -type f -print -quit)
