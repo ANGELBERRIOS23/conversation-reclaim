@@ -1,241 +1,127 @@
 ---
 name: conversation-reclaim
 description: >-
-  Libera espacio en disco acumulado por las conversaciones de agentes de IA
-  (Claude Code, Codex, OpenCode, Antigravity/Gemini, Command Code) recortando
-  TODO lo anterior a la última compactación de cada conversación y conservando
-  el resumen y lo reciente. Incluye respaldo completo previo a disco externo y
-  limpieza de caches/logs/snapshots huérfanos. Úsala cuando el usuario diga
-  "limpiar conversaciones", "liberar espacio de claude/codex/opencode/
-  antigravity", "eliminar lo anterior a las compactaciones", "cuánto espacio
-  ocupan mis conversaciones", "qué puedo borrar de mis agentes" o quiera
-  revisar duplicados de conversaciones entre herramientas.
+  Escanea y libera espacio acumulado por conversaciones de Claude Code, Codex,
+  OpenCode, Antigravity/Gemini y Command Code. Recorta contenido anterior a la
+  última compactación, elimina caches, browser recordings y transcripts de
+  subagentes cerrados, ofrece respaldo opcional y registra cambios. Usar cuando
+  el usuario pida limpiar conversaciones, liberar espacio de agentes, revisar
+  cuánto ocupan, eliminar compactaciones anteriores o encontrar skills duplicadas.
 ---
 
 # conversation-reclaim
 
-Herramienta CLI en Python (solo stdlib) que **detecta el punto de la última
-compactación** de cada conversación y recorta lo anterior, conservando el
-resumen y lo reciente intactos. Nunca borra sin respaldo previo. Además
-escanea **skills repetidas** (para deduplicar con symlinks) y reporta los
-elementos pesados no automáticos (recordings, backups).
+Usar `conversation-reclaim/reclaim.py` desde el repositorio del usuario. Es un
+CLI Python sin dependencias externas.
 
-## Ubicación
+## Flujo obligatorio
 
-- Herramienta: `conversation-reclaim/reclaim.py` (buscar en el workspace del
-  usuario o en su repo). Si no está, clonarla del repo del usuario.
-- Uso: `python3 reclaim.py <comando>`.
+1. Ejecutar `python3 reclaim.py scan` y mostrar al usuario lo recuperable.
+2. Explicar las categorías que se eliminarán. En particular:
+   - `browser_recordings` son capturas ya consumidas por Antigravity; no se
+     reutilizan. El CLI las elimina por defecto y avisa cantidad/tamaño.
+   - Los transcripts de subagentes son artefactos de un solo uso. El CLI borra
+     únicamente hijos cerrados y preserva los activos.
+   - OpenCode elimina todos sus snapshots locales, además de tool-output/logs.
+3. Aplicar solo después de que el usuario autorice la limpieza. Ofrecer
+   `--backup-dir`; es opcional para `apply` y obligatorio para `apply-db`, salvo
+   aceptación explícita mediante `--no-backup`.
+4. Reportar la ruta del manifiesto y, si existe, del respaldo.
+5. Verificar JSONL/SQLite y pedir al usuario reanudar una conversación reciente.
 
 ## Comandos
 
-| Comando | Qué hace |
+| Comando | Acción |
 |---|---|
-| `python3 reclaim.py scan` | Solo lectura: cuánto se puede liberar por herramienta y por conversación, caches, y skills repetidas. **Siempre correrlo primero** y reportar números al usuario. |
-| `python3 reclaim.py skills` | Lista todas las skills por tamaño y marca las repetidas (copias reales que ocupan doble) vs las que ya son symlink. |
-| `python3 reclaim.py apply` | Aplica reducciones **sin respaldo externo** (escribe un manifiesto de cambios en `~/.conversation-reclaim/`). |
-| `python3 reclaim.py apply --backup-dir <disco>` | **Opcional**: respalda TODO en el disco (externo recomendado) y luego reduce. |
-| `python3 reclaim.py apply --only claude\|codex\|opencode\|antigravity\|caches` | Aplicar solo a una herramienta. |
-| `python3 reclaim.py apply --no-antigravity-steps` | Antigravity sin podar las DB de conversación (solo transcripts/logs). |
-| `python3 reclaim.py apply-db --backup-dir <disco>` | Poda `opencode.db` (eventos redundantes + pre-compactación + VACUUM). **Exige respaldo explícito o `--no-backup`.** **Refusa si opencode está corriendo**. |
-| `python3 reclaim.py restore --backup-dir <ruta>` | Guía de restauración desde el respaldo (si se hizo uno). |
+| `python3 reclaim.py gui` | Abre el panel visual de selección y confirmación. |
+| `python3 reclaim.py scan` | Escaneo de solo lectura. Ejecutar primero. |
+| `python3 reclaim.py skills` | Lista skills y duplicados; nunca los elimina. |
+| `python3 reclaim.py apply` | Limpia y escribe manifiesto sin respaldo externo. |
+| `python3 reclaim.py apply --backup-dir <ruta>` | Respalda todos los targets antes de limpiar. |
+| `python3 reclaim.py apply --only claude\|codex\|opencode\|antigravity\|caches` | Limita la limpieza. |
+| `python3 reclaim.py apply --no-antigravity-steps` | Omite la poda de DB de Antigravity. |
+| `python3 reclaim.py apply-db --backup-dir <ruta>` | Poda transaccional de `opencode.db`. |
+| `python3 reclaim.py apply-db --no-backup` | Poda irreversible aceptando el riesgo. |
+| `python3 reclaim.py apply-db --no-backup --close-opencode` | Avisar, cerrar OpenCode normalmente y podar. |
+| `python3 reclaim.py restore --backup-dir <ruta>` | Imprime la guía de restauración manual. |
 
-**Regla de respaldo por defecto:** el respaldo externo NO es automático. Si el
-usuario no pasa `--backup-dir`, `apply` funciona igual pero solo deja un
-manifiesto (qué archivo, cuántos bytes, offset del marcador, fecha). Los
-recortes de Claude/Codex son atómicos (temp + replace): si el script muere a
-mitad, el original queda intacto. Para `apply-db` el respaldo es obligatorio
-(flag `--backup-dir` o `--no-backup`): es la única operación irreversible.
+## Comportamiento por herramienta
 
-## Qué limpia `apply` por herramienta
+- **Claude Code:** validar marcadores JSON estructuralmente, conservar resumen y
+  contenido reciente. Detectar sidechains con `isSidechain`, `agentId` y
+  `sessionId`; borrar los cerrados, incluidos `agent-acompact-*`. No tocar
+  `memory/` ni el transcript principal.
+- **Codex:** aceptar solo un evento JSON superior `type=compacted`. Detectar
+  hijos mediante `session_meta.payload.thread_source=subagent`, UUID y
+  `source.subagent`. Preservar si existe
+  `~/.codex/thread-writer-locks/<id>.lock` o un edge `open` en
+  `state_5.sqlite`; al borrar un hijo cerrado, retirar su rollout y filas de
+  índice/log asociadas. Nunca inferirlo solo por nombre o texto.
+  La limpieza puede ejecutarse desde Codex: omitir la tarea actual, rollouts
+  bloqueados y DB de logs abiertas; recuperar el resto y dejar lo activo para
+  una ejecución posterior.
+- **OpenCode archivos:** borrar snapshots, tool-output y logs. El mensaje debe
+  decir “todos los snapshots”, no “huérfanos”.
+- **OpenCode DB:** ordenar compactaciones por sesión/tiempo/id, usar la última,
+  bloquear con SQLite, borrar en una transacción, procesar IDs por lotes,
+  ejecutar `VACUUM` e `integrity_check`. Rehusar si está abierto o si el
+  contenido no está materializado fuera de `event`.
+  Si está abierto, avisar y pedir autorización antes de usar
+  `--close-opencode`. Cerrar solo mediante quit normal; nunca forzar. Si el PID
+  que mantiene la DB es ancestro/anfitrión del CLI, rehusar cerrarlo y pedir que
+  se ejecute desde Terminal, Codex u otro harness externo.
+- **Antigravity:** recortar transcripts estructuralmente, podar pasos anteriores
+  al último `step_type=98`, omitir DB abiertas y limpiar logs, crashes, cache,
+  scratch y browser recordings con aviso previo.
+- **Command Code:** solo escanear/respaldar hasta conocer un marcador seguro.
 
-- **Claude Code / Codex**: recorta cada conversación compactada hasta su último
-  marcador (resumen + reciente se conservan). En Claude Code además **elimina
-  los transcripts de subagentes hijos** (`subagents/agent-*.jsonl` y sus
-  `.meta.json`, de un solo uso) conservando los `agent-acompact` (resúmenes de
-  compactación) y `memory/`. **Nota: preferible correr sin Claude abierto y sin
-  conversaciones de subagentes activas** — si Claude está corriendo, `apply`
-  se omite (check con lsof); si hubiera una sesión de subagente activa, su
-  transcript se borraría (es de un solo uso, pero mejor evitarlo).
-- **OpenCode (archivos)**: snapshots huérfanos, tool-output y logs.
-- **OpenCode (DB)**: `apply-db` — eventos de streaming redundantes +
-  pre-compactación + VACUUM (requiere opencode cerrado).
-- **Antigravity**: transcripts recortados en el marcador, pasos pre-compactación
-  en las DB, scratch, logs, crashes, caches y **browser_recordings**.
-- **Codex**: sesiones recortadas + cache y logs sqlite.
+## Interfaz visual
 
-## browser_recordings — QUÉ SON Y CUÁNDO BORRARLAS
+Usar `gui.py` como capa delgada sobre las funciones auditadas de `reclaim.py`.
+Mostrar estimación, recomendación, explicación y estado activo por categoría;
+marcar por defecto solo elementos recomendados con tamaño mayor que cero. Dejar
+que el usuario desmarque categorías, elija respaldo y confirme el conjunto
+exacto antes de aplicar. Mantener toda operación de disco en el motor común para
+que CLI y GUI compartan las mismas protecciones y manifiestos.
 
-`~/.gemini/antigravity-ide/browser_recordings/` son **capturas/imágenes que
-Antigravity guarda cuando usas el modo browser** (cada sesión con el navegador
-deja frames `.jpg` + metadata). Pueden pesar varios GB. Regla recomendada:
+En Windows, detectar archivos abiertos mediante la API nativa de file sharing.
+El cierre automático de OpenCode es solo macOS; pedir cierre manual en Windows.
 
-- Revisar las fechas: si son de hace >1-2 meses, son candidatas seguras.
-- Borrarlas **todo** o **las más viejas** (`--only antigravity` borra todo el
-  directorio). No afectan conversaciones ni código.
-- Codex NO tiene estas imágenes (su `computer-use` es la app en sí, 63 MB).
-  Claude Code tampoco (sus dirs de browser están vacíos). Solo Antigravity las
-  acumula.
-- `antigravity-backup/` (~/.gemini) es un respaldo viejo del app: verificar con
-  el usuario si lo hizo él y su última fecha de uso antes de tocar; en este
-  equipo ya se eliminó por decisión del usuario.
+## Garantías y manifiesto
 
-## Dónde vive cada historial y su marcador de compactación
+- Fallar cerrado ante JSON inválido, marcador ambiguo, symlink inesperado,
+  archivo activo, esquema desconocido o imposibilidad de comprobar el uso.
+- Realizar recortes con un temporal impredecible en el mismo directorio,
+  preservar permisos, sincronizar y reemplazar atómicamente.
+- Registrar cada recorte/borrado con herramienta, acción, ruta, bytes, marcador,
+  estado y hora en `~/.conversation-reclaim/manifest-*.jsonl`.
+- Si se pidió respaldo y alguna copia/verificación falla, abortar antes de
+  mutar. El respaldo debe incluir recordings, caches, estado/logs Codex y todo
+  target que vaya a eliminarse.
+- Propagar códigos de salida no cero; no declarar éxito cuando hubo rechazo o
+  fallo parcial.
 
-| Herramienta | Ruta | Marcador de compactación |
+## Rutas y marcadores
+
+| Herramienta | Ruta | Marcador |
 |---|---|---|
-| Claude Code | `~/.claude/projects/<proyecto>/<uuid>.jsonl` | línea con `Conversation compacted` / `compactMetadata` / `isSummary` |
-| Codex | `~/.codex/sessions/<año>/<mes>/<día>/rollout-*.jsonl` | evento `"type":"compacted"` |
-| OpenCode | `~/.local/share/opencode/opencode.db` (SQLite) | part `type=compaction` con `tail_start_id`; basura en tabla `event` (`message.part.updated.1`, etc.) |
-| Antigravity | `~/.gemini/antigravity{,,-cli,-ide}/conversations/<id>.db` | pasos `step_type 98` (CONVERSATION_HISTORY); transcripts en `brain/<id>/.system_generated/logs/` |
-| Command Code | `~/.commandcode/projects/` | sin marcador detectable (solo escaneo) |
+| Claude | `~/.claude/projects/<proyecto>/**/*.jsonl` | campos superiores de resumen/compactación |
+| Codex | `~/.codex/sessions/**/rollout-*.jsonl` | evento superior `type=compacted` |
+| OpenCode | `~/.local/share/opencode/opencode.db` | part compaction con `tail_start_id` |
+| Antigravity | `~/.gemini/antigravity{,,-cli,-ide}/conversations/*.db` | step `step_type=98` |
+| Command Code | `~/.commandcode/projects/` | ninguno conocido |
 
-## Skills repetidas
+## Verificación
 
-Los agentes copian la misma skill a varias raíces (`~/.claude/skills`,
-`~/.config/opencode/skills`, `~/.agents/skills`, `~/.gemini/skills`,
-`~/.antigravity/skills`), ocupando espacio doble/triple. La herramienta solo
-**lista y recomienda** — NO borra skills. Para deduplicar (con confirmación del
-usuario): dejar una canonical y reemplazar las demás por symlink
-(`ln -s ../../.claude/skills/<nombre> <otra-raíz>/<nombre>`), como ya hace
-`~/.gemini/skills/media-use`.
-
-## Fallback: si el script falla o se hace a mano
-
-Todo lo que la herramienta hace se puede hacer/revisar manualmente. Esto es lo
-que se sabe de cada almacenamiento (usado para diagnosticar y para limpieza
-manual si la herramienta no corre):
-
-**Manifiesto de cambios** (siempre se escribe): `~/.conversation-reclaim/manifest-<fecha>.jsonl`
-— cada línea: `{"tool","file","cut_bytes","old_size","marker_offset","time"}`.
-Úsalo para saber exactamente qué se tocó. Los `*.reclaim-tmp` que queden tras
-una interrupción se pueden borrar (el original quedó intacto si el replace no
-se ejecutó).
-
-**Verificación rápida después de tocar algo:**
-```bash
-# Claude/Codex: el archivo debe ser JSONL válido desde la primera línea
-python3 -c "import json;[json.loads(l) for l in open('ruta.jsonl')]"
-# DBs SQLite
-sqlite3 ruta.db "PRAGMA integrity_check"        # → ok
-```
-
-**Claude Code** (`~/.claude/projects/<proyecto>/<uuid>.jsonl`): recorte manual:
-```bash
-python3 - <<'EOF'
-import json, pathlib
-p = pathlib.Path("ARCHIVO.jsonl"); out = []
-marker = 0
-for i, raw in enumerate(open(p, 'rb')):
-    if b'compactMetadata' in raw or b'Conversation compacted' in raw:
-        marker += len(raw)  # el ÚLTIMO marcador es el que vale
-    else:
-        marker += len(raw)
-EOF
-```
-(equivalente: `grep -n 'Conversation compacted' archivo.jsonl` → el último
-número de línea; conservar desde ahí con `tail -n +N archivo.jsonl > nuevo`).
-
-**Codex** (`~/.codex/sessions/<año>/<mes>/<día>/rollout-*.jsonl`): igual, con el
-evento `"type":"compacted"`.
-
-**OpenCode** (`opencode.db`, tabla `event` con tipos `message.part.updated.1`,
-`message.updated.1`, `session.updated.1` que duplican cada part en streaming):
-```bash
-sqlite3 opencode.db "SELECT count(*), sum(length(data)) FROM event WHERE type='message.part.updated.1'"
-# limpieza manual de los redundantes (tras respaldar y con opencode cerrado):
-sqlite3 opencode.db "DELETE FROM event WHERE type IN ('message.updated.1','message.part.updated.1','session.updated.1'); VACUUM;"
-```
-Marcador de compactación: part `type=compaction` con `tail_start_id` (todo
-mensaje anterior a ese id es pre-compactación).
-
-**Antigravity/Gemini** (`~/.gemini/antigravity{,,-cli,-ide}/`): conversaciones
-en `conversations/<id>.db` (pasos `step_type 98` = compactación), transcripts
-en `brain/<id>/.system_generated/logs/transcript*.jsonl`, imágenes del modo
-browser en `antigravity-ide/browser_recordings/` (pesan GB, son capturas de
-sesiones de browser, borrables si son viejas), y `antigravity-backup/` (ver con
-el usuario si es suyo y si lo sigue usando).
-
-**Caches 100% seguros** (borrar no cuesta tokens — el prompt caching vive en el
-servidor): `opencode snapshot/` (huérfanos si `session_context_epoch` está
-vacía), `tool-output/`, `log/`, `.gemini/*/{log,crashes,cache,scratch}`,
-`logs` de las apps Antigravity, `~/.codex/cache` y `logs_*.sqlite`.
-
-**Restauración** con `restore`: copiar desde el respaldo `claude-projects/`,
-`codex-sessions/`, `opencode.db`, `gemini-*/` etc. a sus rutas originales.
-
-**Windows**: rutas bajo `%USERPROFILE%\.claude`, `%USERPROFILE%\.codex`,
-`%USERPROFILE%\.local\share\opencode` (o `%LOCALAPPDATA%\opencode`),
-`%USERPROFILE%\.gemini`, `%USERPROFILE%\.commandcode`, `%APPDATA%\Antigravity`.
-En Windows no hay `lsof`: `apply-db` no detecta la DB abierta, cerrar opencode
-a mano.
-
-## Flujo de trabajo recomendado
-
-1. **Escanear**: `python3 reclaim.py scan` → reportar total escaneado y
-   recuperable, más los top por conversación y los caches (snapshots huérfanos
-   de opencode, tool-output, logs, scratch, recordings).
-2. **Preguntar al usuario** qué autoriza y si quiere respaldo externo
-   (`--backup-dir /Volumes/<disco>`) o ir sin respaldo (solo manifiesto).
-   Regla del usuario: *si hay respaldo, backup primero; después aplicar*.
-3. **Aplicar**: `apply [--backup-dir <disco>]` (o `--only`). Anotar la ruta del
-   respaldo si se hizo y la del manifiesto.
-4. **Verificar**: `PRAGMA integrity_check` en DBs tocadas, validar JSONL
-   recortados, y pedir al usuario que pruebe reanudar una conversación de cada
-   herramienta.
-5. **opencode.db**: si opencode está corriendo, `apply-db` no puede ejecutarse;
-   darle el comando exacto al usuario para cuando lo cierre, recordando que
-   requiere `--backup-dir` o `--no-backup`.
-
-## Reglas de seguridad (no romperlas)
-
-- Nunca aplicar sin respaldo previo. El respaldo va a disco externo
-  (`/Volumes/DOCUMENTOS` si existe).
-- No tocar `browser_recordings` sin que el usuario lo autorice (son imágenes
-  del modo browser; explicarle qué son y sus fechas). Codex y Claude NO tienen
-  estas imágenes.
-- No tocar `antigravity-backup` sin verificar con el usuario (puede ser un
-  respaldo que él hizo).
-- En Antigravity, si una DB está abierta por la app se omite (check con lsof).
-- En opencode, `apply-db` se niega si la DB está en uso.
-- El recorte de Claude Code/Codex conserva la línea del último marcador hacia
-  adelante (resumen incluido); nunca recortar si no hay marcador.
-- Los caches locales (tool-output, logs, snapshots, scratch, caches de codex)
-  se pueden borrar sin gastar tokens: el prompt caching es del lado del
-  servidor.
-- **Skills: solo listar y recomendar. Nunca borrarlas.** Si el usuario quiere
-  deduplicar, proponer symlinks y pedir confirmación explícita.
-
-## Disclaimer (decírselo al usuario cuando haga falta)
-
-La herramienta borra datos (contenido pre-compactación, caches, transcripts de
-subagentes). El diseño conserva resumen + reciente, pero **quien pide el
-borrado es responsable de lo que se borra**. Antes de `apply`, mostrar siempre
-la salida de `scan` y confirmar con el usuario; recomendar `--backup-dir` ante
-la duda. Si el usuario pide borrar una conversación entera a propósito, es su
-decisión.
-
-## Contribuciones a la herramienta (si el usuario quiere aportar)
-
-Bienvenidos soportes para Cursor, Kiro, Ghost, Trae, harnesses de DeepSeek o
-cualquiera. El PR debe indicar: SO donde se probó, nombre + URL del CLI/app
-para verificar que existe y cómo guarda datos, dónde vive el historial y cuál
-es su marcador de compactación (siguiendo `scan_<tool>()` + `apply_<tool>()` +
-`PATHS`), salida de scan antes/después y confirmación de que el resume
-funciona. **Todo PR pasa revisión humana antes de aprobarse.**
-
-## Ejemplos típicos
+Ejecutar las regresiones del proyecto antes de distribuir cambios:
 
 ```bash
-python3 reclaim.py scan
-python3 reclaim.py apply --backup-dir /Volumes/DOCUMENTOS
-python3 reclaim.py apply --only antigravity --backup-dir /Volumes/DOCUMENTOS
-python3 reclaim.py apply-db   # con opencode cerrado
+python3 -m unittest discover -v
+python3 -m py_compile reclaim.py
 ```
 
-## Verificación post-aplicación
+Después de limpiar, comprobar `PRAGMA integrity_check` en las DB afectadas y
+validar que los JSONL restantes se parsean desde la primera línea.
 
-- `sqlite3 ~/.local/share/opencode/opencode.db "PRAGMA integrity_check"` → ok
-- `sqlite3 <db antigravity> "PRAGMA integrity_check"` → ok
-- Parsear las primeras/últimas líneas de los JSONL recortados.
-- Confirmar con el usuario que las conversaciones recientes siguen visibles y
-  que puede reanudarlas.
+Las skills duplicadas solo se reportan. Proponer symlinks si el usuario desea
+deduplicarlas y pedir confirmación específica antes de cambiar nada.

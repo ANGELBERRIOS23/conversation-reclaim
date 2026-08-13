@@ -8,11 +8,11 @@ Analiza, respalda y reduce el almacenamiento de:
   - Codex         (~/.codex/sessions)    idem con sus eventos "compacted"
   - OpenCode      (opencode.db)          poda pre-compactación + evento-log
                                           redundante (integra opencode-db-prune)
-                                          + snapshots huérfanos + tool-output
+                                          + snapshots + tool-output
   - Command Code  (~/.commandcode)       solo escaneo/backup (sin marcadores)
 
-Antes de tocar NADA hace un respaldo completo en el destino indicado
-(disco externo recomendado). Todo es reversible desde ese respaldo.
+Antes de tocar muestra las categorías destructivas. Si se indica un destino,
+hace y verifica un respaldo completo (disco externo recomendado).
 
 Uso:
     python3 reclaim.py scan                   # estima (solo lee)
@@ -31,13 +31,16 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import stat
+import tempfile
 import time
 from collections import defaultdict
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home()
-VERSION = "2.1.0"
+VERSION = "2.3.0"
 MANIFEST_DIR = HOME / ".conversation-reclaim"
 
 # ---------------------------------------------------------------------------
@@ -68,7 +71,6 @@ _T = {
     "subagentes eliminados:": "subagents deleted:",
     "archivos,": "files,",
     "recortados": "trimmed",
-    "snapshots huérfanos:": "orphan snapshots:",
     "codex cache:": "codex cache:",
     "no existe opencode.db": "opencode.db not found",
     "REFUSED: opencode.db está abierto (opencode corriendo).":
@@ -128,9 +130,8 @@ def _(s):
     return _T.get(s, s)
 
 
-# Marcadores de compactación por herramienta
-CLAUDE_MARKERS = ("compactMetadata", "Conversation compacted", '"isSummary":true', '"type":"summary"')
-CODEX_MARKER = '"type":"compacted"'
+# Los marcadores se validan sobre JSON estructurado. Buscar substrings en una
+# línea podría confundir contenido citado con un evento real de compactación.
 OPENCODE_REDUNDANT_EVENTS = ("message.updated.1", "message.part.updated.1", "session.updated.1")
 
 # Rutas a tocar (multiplataforma: macOS/Linux usan HOME; Windows usa USERPROFILE
@@ -166,6 +167,8 @@ PATHS = {
     "codex_archived": HOME / ".codex" / "archived_sessions",
     "codex_cache": HOME / ".codex" / "cache",
     "codex_logs": [HOME / ".codex" / "logs_1.sqlite", HOME / ".codex" / "logs_2.sqlite"],
+    "codex_state": HOME / ".codex" / "state_5.sqlite",
+    "codex_locks": HOME / ".codex" / "thread-writer-locks",
     "opencode_dir": _opencode_dir(),
     "opencode_db": _opencode_db(),
     "commandcode": HOME / ".commandcode" / "projects",
@@ -200,7 +203,136 @@ def human(n):
 
 
 def now():
-    return datetime.now().strftime("%Y%m%d-%H%M%S")
+    return datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+
+
+def parse_json_line(raw):
+    """Parsea una línea JSONL estrictamente; devuelve None si no es válida."""
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def is_claude_compaction(record):
+    if not isinstance(record, dict):
+        return False
+    if isinstance(record.get("compactMetadata"), dict):
+        return True
+    if record.get("isSummary") is True or record.get("type") == "summary":
+        return True
+    return (record.get("type") == "system" and
+            record.get("subtype") == "compact_boundary")
+
+
+def is_codex_compaction(record):
+    return isinstance(record, dict) and record.get("type") == "compacted"
+
+
+def is_antigravity_compaction(record):
+    return (isinstance(record, dict) and
+            record.get("type") == "CONVERSATION_HISTORY")
+
+
+def find_last_marker(path, predicate):
+    """Devuelve (offset, error). Ante JSONL inválido falla cerrado."""
+    last_marker = -1
+    offset = 0
+    try:
+        with open(path, "rb") as fh:
+            for line_no, raw in enumerate(fh, 1):
+                record = parse_json_line(raw)
+                if record is None:
+                    return -1, f"JSON inválido en línea {line_no}"
+                if predicate(record):
+                    last_marker = offset
+                offset += len(raw)
+    except OSError as exc:
+        return -1, str(exc)
+    return last_marker, None
+
+
+def codex_session_metadata(path):
+    """Extrae metadatos propios del hijo, incluso en rollouts heredados."""
+    try:
+        with open(path, "rb") as fh:
+            for _ in range(64):
+                raw = fh.readline()
+                if not raw:
+                    break
+                record = parse_json_line(raw)
+                if record is None:
+                    return None
+                if (record.get("type") == "session_meta" and
+                        isinstance(record.get("payload"), dict) and
+                        record["payload"].get("thread_source") == "subagent"):
+                    payload = record.get("payload")
+                    return payload if isinstance(payload, dict) else None
+    except OSError:
+        return None
+    return None
+
+
+def codex_subagent_info(path):
+    meta = codex_session_metadata(path)
+    if not meta or meta.get("thread_source") != "subagent":
+        return None
+    thread_id = meta.get("id") or meta.get("session_id")
+    source = meta.get("source")
+    if (not thread_id or not isinstance(source, dict) or
+            not isinstance(source.get("subagent"), dict)):
+        return None
+    if str(thread_id) not in Path(path).name:
+        return None
+    return {
+        "thread_id": str(thread_id),
+        "parent_thread_id": meta.get("parent_thread_id"),
+        "agent_path": meta.get("agent_path"),
+    }
+
+
+def codex_subagent_is_active(thread_id, path=None):
+    if path is not None and database_in_use(path) is not False:
+        return True
+    lock = PATHS["codex_locks"] / f"{thread_id}.lock"
+    if lock.exists():
+        return True
+    state = PATHS["codex_state"]
+    if state.exists():
+        try:
+            with closing(sqlite3.connect(f"file:{state}?mode=ro", uri=True)) as con:
+                row = con.execute(
+                    "SELECT status FROM thread_spawn_edges WHERE child_thread_id=?",
+                    (thread_id,)).fetchone()
+            return bool(row and row[0] == "open")
+        except sqlite3.Error:
+            return True
+    return False
+
+
+def claude_subagent_info(path):
+    """Valida un sidechain de Claude por contenido y ubicación, no solo nombre."""
+    path = Path(path)
+    if path.parent.name != "subagents" or not path.name.startswith("agent-"):
+        return None
+    expected_agent = path.stem[len("agent-"):]
+    expected_session = path.parent.parent.name
+    found = False
+    try:
+        with open(path, "rb") as fh:
+            for raw in fh:
+                record = parse_json_line(raw)
+                if record is None:
+                    return None
+                if record.get("isSidechain") is True:
+                    agent = record.get("agentId")
+                    session = record.get("sessionId")
+                    if agent != expected_agent or session != expected_session:
+                        return None
+                    found = True
+    except OSError:
+        return None
+    return {"agent_id": expected_agent, "session_id": expected_session} if found else None
 
 
 # ---------------------------------------------------------------------------
@@ -216,22 +348,17 @@ def scan_claude():
     for f in sorted(base.glob("*/*.jsonl")):
         size = f.stat().st_size
         total += size
-        last_marker = -1
-        offset = 0
-        with open(f, "rb") as fh:
-            for raw in fh:
-                line = raw.decode("utf-8", errors="ignore")
-                if any(m in line for m in CLAUDE_MARKERS):
-                    last_marker = offset
-                offset += len(raw)
+        last_marker, error = find_last_marker(f, is_claude_compaction)
+        if error:
+            continue
         if last_marker >= 0:
             compacted += 1
             reclaim += last_marker
             top.append((last_marker, size, str(f)))
-    # Subagentes hijos (transcripts de un solo uso) — se conservan los acompact
+    # Sidechains de subagentes: artefactos de un solo uso, incluidos acompact.
     sub = sub_big = 0
     for p in base.rglob("subagents/agent-*.jsonl"):
-        if "acompact" in p.name:
+        if not claude_subagent_info(p):
             continue
         sub += p.stat().st_size
         sub_big += 1
@@ -249,17 +376,21 @@ def scan_codex():
     if not base.exists():
         return None
     files = sorted(base.rglob("*.jsonl"))
+    subagents_bytes = subagents_n = active_subagents = 0
     for f in files:
         size = f.stat().st_size
         total += size
-        last_marker = -1
-        offset = 0
-        with open(f, "rb") as fh:
-            for raw in fh:
-                line = raw.decode("utf-8", errors="ignore")
-                if CODEX_MARKER in line:
-                    last_marker = offset
-                offset += len(raw)
+        sub = codex_subagent_info(f)
+        if sub:
+            if codex_subagent_is_active(sub["thread_id"], f):
+                active_subagents += 1
+            else:
+                subagents_bytes += size
+                subagents_n += 1
+            continue
+        last_marker, error = find_last_marker(f, is_codex_compaction)
+        if error:
+            continue
         if last_marker >= 0:
             compacted += 1
             reclaim += last_marker
@@ -267,7 +398,9 @@ def scan_codex():
     archived = sum(p.stat().st_size for p in PATHS["codex_archived"].rglob("*")) \
         if PATHS["codex_archived"].exists() else 0
     return {"total": total, "reclaim": reclaim, "compacted": compacted,
-            "archived": archived, "top": sorted(top, reverse=True)}
+            "archived": archived, "top": sorted(top, reverse=True),
+            "subagents_bytes": subagents_bytes, "subagents_n": subagents_n,
+            "active_subagents": active_subagents}
 
 
 def scan_opencode():
@@ -279,9 +412,10 @@ def scan_opencode():
     page_size = cur.execute("PRAGMA page_size").fetchone()[0]
     page_count = cur.execute("PRAGMA page_count").fetchone()[0]
     db_total = page_size * page_count
-    ev = cur.execute("SELECT count(*), sum(length(data)) FROM event").fetchone()
+    ev = cur.execute("SELECT count(*), coalesce(sum(length(data)),0) FROM event").fetchone()
     red = cur.execute(
-        f"SELECT count(*), sum(length(data)) FROM event WHERE type IN ({','.join('?'*3)})",
+        f"SELECT count(*), coalesce(sum(length(data)),0) FROM event "
+        f"WHERE type IN ({','.join('?'*3)})",
         OPENCODE_REDUNDANT_EVENTS).fetchone()
 
     reclaim = 0
@@ -307,20 +441,18 @@ def scan_opencode():
         waste = ids[:idx]
         if not waste:
             continue
-        q = ",".join("?" * len(waste))
         mlen = sum(m[1] for m in msgs[:idx])
-        plen = cur.execute(
-            f"SELECT coalesce(sum(length(data)),0) FROM part WHERE message_id IN ({q})",
-            waste).fetchone()[0]
-        pids = [r[0] for r in cur.execute(
-            f"SELECT id FROM part WHERE message_id IN ({q})", waste).fetchall()]
-        elen = 0
-        if pids:
-            q2 = ",".join("?" * len(pids))
-            elen = cur.execute(
-                f"SELECT coalesce(sum(length(data)),0) FROM event "
-                f"WHERE json_extract(data,'$.part.id') IN ({q2})", pids).fetchone()[0]
-        reclaim += mlen + plen + elen
+        plen = 0
+        for batch in chunks(waste):
+            q = ",".join("?" * len(batch))
+            plen += cur.execute(
+                f"SELECT coalesce(sum(length(data)),0) FROM part WHERE message_id IN ({q})",
+                batch).fetchone()[0]
+        # No inspeccionar el JSON de toda la tabla event por cada sesión: es
+        # O(sesiones × eventos) y en DB grandes tarda minutos. Los eventos de
+        # streaming ya se reportan por tipo en `redundant`; aquí estimamos solo
+        # message + part para evitar doble conteo y mantener `scan` interactivo.
+        reclaim += mlen + plen
     con.close()
     return {"db_total": db_total, "events": ev, "redundant": red,
             "compactions": len(comps), "reclaim": reclaim}
@@ -370,25 +502,23 @@ def scan_antigravity():
             if w.exists():
                 wal_total += w.stat().st_size
             try:
-                con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-                marks = con.execute(
-                    "SELECT idx FROM steps WHERE step_type=? "
-                    "ORDER BY idx DESC LIMIT 1", (ANTIGRAVITY_COMPACT_STEP,)).fetchone()
-                if marks:
-                    compacted += 1
-                    before = con.execute(
-                        "SELECT coalesce(sum(length(step_payload)),0) FROM steps WHERE idx<?",
-                        (marks[0],)).fetchone()[0]
-                    reclaim += before
-                    top.append((before, sz, str(db)))
-                con.close()
+                with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as con:
+                    marks = con.execute(
+                        "SELECT idx FROM steps WHERE step_type=? "
+                        "ORDER BY idx DESC LIMIT 1", (ANTIGRAVITY_COMPACT_STEP,)).fetchone()
+                    if marks:
+                        compacted += 1
+                        before = con.execute(
+                            "SELECT coalesce(sum(length(step_payload)),0) FROM steps WHERE idx<?",
+                            (marks[0],)).fetchone()[0]
+                        reclaim += before
+                        top.append((before, sz, str(db)))
             except sqlite3.Error:
                 pass
     brain = sum(dir_size(gem / b) for b in GEMINI_BRAIN_DIRS)
     scratch = sum(dir_size(gem / b) for b in
                   ("antigravity/scratch", "antigravity-cli/scratch",
-                   "antigravity-ide/scratch", "antigravity/implicit",
-                   "antigravity-cli/implicit", "antigravity-ide/implicit"))
+                   "antigravity-ide/scratch"))
     recordings = dir_size(gem / "antigravity-ide" / "browser_recordings")
     backup = dir_size(gem / "antigravity-backup")
     return {"conv_total": conv_total, "wal_total": wal_total, "nconv": nconv,
@@ -458,7 +588,7 @@ def scan():
     print("=" * 72)
     print(f" conversation-reclaim — {_('escaneo (solo lectura)')}")
     print("=" * 72)
-    total = reclaim = 0
+    total = reclaim = disposable = 0
     for name, fn in (("Claude Code", scan_claude),
                      ("Codex", scan_codex),
                      ("OpenCode", scan_opencode),
@@ -474,20 +604,23 @@ def scan():
             continue
         rec = r.get("reclaim", 0)
         tot = r.get("total", r.get("db_total", 0))
-        total += tot
-        reclaim += rec
         extra = ""
         ncomp = r.get("compacted", 0)
         if name == "Codex":
-            extra = f"  | archived_sessions: {human(r.get('archived',0))}"
+            extra = (f"  | archived_sessions: {human(r.get('archived',0))}"
+                     f" | subagentes cerrados: {human(r.get('subagents_bytes',0))} "
+                     f"({r.get('subagents_n',0)}), activos: {r.get('active_subagents',0)}")
+            disposable += r.get("subagents_bytes", 0)
         elif name == "Claude Code":
             extra = (f"  | subagentes: {human(r.get('subagents_bytes',0))} "
                      f"({r.get('subagents_n',0)}) + workflows "
                      f"{human(r.get('workflows_bytes',0))}")
+            disposable += r.get("subagents_bytes", 0) + r.get("workflows_bytes", 0)
         if name == "OpenCode":
             extra = (f"  | {_('eventos redundantes:')} {human(r['redundant'][1])} "
                      f"({r['redundant'][0]:,} {_('filas')})")
             ncomp = r.get("compactions", 0)
+            disposable += r["redundant"][1] or 0
         elif name == "Antigravity":
             extra = (f"  | WAL: {human(r.get('wal_total',0))} | brain: "
                      f"{human(r.get('brain',0))} | recordings: "
@@ -495,20 +628,27 @@ def scan():
             ncomp = r.get("compacted", 0)
             tot = r.get("conv_total", 0) + r.get("wal_total", 0)
             rec = r.get("reclaim", 0)
+            disposable += r.get("scratch", 0) + r.get("recordings", 0)
+        total += tot
+        reclaim += rec
         print(f"{name:<13}{human(tot):>10}  {_('recuperable por compactación:')} {human(rec):>9}  "
               f"({ncomp} {_('compactadas')}){extra}")
         for b, s, fpath in r.get("top", [])[:4]:
             print(f"    {human(b):>9} de {human(s):>9}  {Path(fpath).name[:50]}")
 
     print(f"{'='*72}")
-    print(f"{'TOTAL':<13}{human(total):>10}   {_('recuperable:')} {human(reclaim)}")
+    print(f"{'TOTAL':<13}{human(total):>10}   compactación: {human(reclaim)}")
     print(f"  {_('Caches/snapshots adicionales:')}")
     for label, path in (("opencode snapshots", PATHS["opencode_dir"] / "snapshot"),
                         ("opencode tool-output", PATHS["opencode_dir"] / "tool-output"),
                         ("opencode logs", PATHS["opencode_dir"] / "log"),
                         ("codex cache", PATHS["codex_cache"]),
                         ("codex logs sqlite", PATHS["codex_logs"])):
-        print(f"    {label:<22}{human(dir_size(path)):>10}")
+        size = dir_size(path)
+        disposable += size
+        print(f"    {label:<22}{human(size):>10}")
+    print(f"  Desechable adicional: {human(disposable)}")
+    print(f"  Recuperable estimado total: {human(reclaim + disposable)}")
 
     sk = scan_skills()
     print()
@@ -517,14 +657,14 @@ def scan():
         print(f"  {_('Skills repetidas:')}")
         for name, copies, links in sk["dupes"]:
             detail = " + ".join(f"{human(sz)} ({Path(r).parent.name}/{Path(r).name})"
-                                for r, sz in copies)
+                                for r, sz, _is_link in copies)
             if links:
                 detail += f" {_('| ya symlink:')} {', '.join(r for r, _, _ in links)}"
             print(f"    {name:<28}{detail}")
         print(f"    {_('Recomendación: dejar una canonical y crear symlinks en las demás.')}")
     else:
         print(f"  {_('Sin skills repetidas.')}")
-    return total, reclaim
+    return total, reclaim + disposable
 
 
 # ---------------------------------------------------------------------------
@@ -532,16 +672,115 @@ def scan():
 # ---------------------------------------------------------------------------
 
 def database_in_use(path):
+    users = database_users(path)
+    return None if users is None else bool(users)
+
+
+def database_users(path):
+    """Lista procesos que tienen abierto un archivo, o None si no es verificable."""
+    if _IS_WIN:
+        try:
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            create_file = kernel32.CreateFileW
+            create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                                    wintypes.DWORD, wintypes.LPVOID,
+                                    wintypes.DWORD, wintypes.DWORD,
+                                    wintypes.HANDLE]
+            create_file.restype = wintypes.HANDLE
+            handle = create_file(str(path), 0x80000000, 0, None, 3, 0x80, None)
+            invalid = ctypes.c_void_p(-1).value
+            if handle == invalid:
+                error = ctypes.get_last_error()
+                if error in (32, 33):  # sharing/lock violation
+                    return [{"pid": -1, "command": "proceso de Windows"}]
+                return None
+            kernel32.CloseHandle(handle)
+            return []
+        except (AttributeError, OSError):
+            return None
     try:
-        result = subprocess.run(["lsof", "--", str(path)],
+        result = subprocess.run(["lsof", "-Fpc", "--", str(path)],
                                 capture_output=True, text=True)
-        return bool(result.stdout.strip())
-    except Exception:
+        if result.returncode not in (0, 1):
+            return None
+        users = []
+        current = None
+        for line in result.stdout.splitlines():
+            if line.startswith("p") and line[1:].isdigit():
+                current = {"pid": int(line[1:]), "command": ""}
+                users.append(current)
+            elif line.startswith("c") and current is not None:
+                current["command"] = line[1:]
+        return users
+    except (OSError, subprocess.SubprocessError):
         return None
+
+
+def process_is_current_ancestor(candidate_pid):
+    """True si cerrar candidate_pid podría matar este propio proceso."""
+    pid = os.getpid()
+    for _ in range(64):
+        if pid == candidate_pid:
+            return True
+        if pid <= 1:
+            return False
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "ppid=", "-p", str(pid)],
+                capture_output=True, text=True)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0 or not result.stdout.strip().isdigit():
+            return None
+        pid = int(result.stdout.strip())
+    return None
+
+
+def close_opencode_for_cleanup(db):
+    """Cierra OpenCode solo si no es el proceso anfitrión del propio CLI."""
+    users = database_users(db)
+    if users is None:
+        print("  REFUSED: no se pudieron identificar los procesos que usan opencode.db.")
+        return False
+    if not users:
+        return True
+    for user in users:
+        relation = process_is_current_ancestor(user["pid"])
+        if relation is not False:
+            reason = "es la aplicación anfitriona" if relation else "no se pudo verificar su relación"
+            print(f"  REFUSED: no se cerrará {user['command']} PID {user['pid']}; {reason}.")
+            print("  Ejecuta apply-db desde Terminal, Codex u otro agente externo a OpenCode.")
+            return False
+    if sys.platform != "darwin":
+        print("  REFUSED: --close-opencode solo está implementado de forma segura en macOS.")
+        return False
+    names = ", ".join(f"{u['command']} PID {u['pid']}" for u in users)
+    print(f"  AVISO: se cerrará OpenCode para liberar la DB ({names}).")
+    try:
+        subprocess.run(["osascript", "-e", 'tell application "OpenCode" to quit'],
+                       capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        state = database_in_use(db)
+        if state is False:
+            print("  OpenCode cerrado; la DB quedó libre.")
+            return True
+        if state is None:
+            break
+        time.sleep(0.25)
+    print("  REFUSED: OpenCode no cerró a tiempo; no se forzó el proceso.")
+    return False
 
 
 def safe_copy(src, dst):
     """Copia datos + metadatos si el destino los acepta (exFAT no soporta chflags)."""
+    if Path(src).is_symlink():
+        os.symlink(os.readlink(src), dst)
+        return
     shutil.copyfile(src, dst)
     try:
         shutil.copystat(src, dst)
@@ -550,7 +789,13 @@ def safe_copy(src, dst):
 
 
 def backup(backup_dir):
-    dest = Path(backup_dir) / f"conversation-reclaim-{now()}"
+    root = Path(backup_dir).expanduser().resolve()
+    sources = [Path(p).resolve() for p in
+               (PATHS["claude_projects"], PATHS["codex_sessions"],
+                PATHS["opencode_dir"], PATHS["gemini"])]
+    if any(root == src or src in root.parents for src in sources):
+        raise ValueError("el destino de respaldo no puede estar dentro de una fuente")
+    dest = root / f"conversation-reclaim-{now()}"
     dest.mkdir(parents=True, exist_ok=True)
     copied = 0
     print(f"{_('Backup en:')} {dest}")
@@ -558,14 +803,8 @@ def backup(backup_dir):
     # Claude Code: copia completa de ~/.claude/projects
     if PATHS["claude_projects"].exists():
         d = dest / "claude-projects"
-        d.mkdir(parents=True, exist_ok=True)
-        for f in PATHS["claude_projects"].rglob("*"):
-            rel = f.relative_to(PATHS["claude_projects"])
-            if f.is_dir():
-                (d / rel).mkdir(parents=True, exist_ok=True)
-            else:
-                (d / rel).parent.mkdir(parents=True, exist_ok=True)
-                safe_copy(f, d / rel)
+        shutil.copytree(PATHS["claude_projects"], d, copy_function=safe_copy,
+                        symlinks=True)
         copied += dir_size(d)
         print(f"  claude-projects  -> {human(dir_size(d))}")
 
@@ -574,31 +813,49 @@ def backup(backup_dir):
                     ("codex-archived", PATHS["codex_archived"]),
                     ("codex-cache", PATHS["codex_cache"])):
         if p.exists():
-            shutil.copytree(p, dest / name, copy_function=safe_copy)
+            shutil.copytree(p, dest / name, copy_function=safe_copy, symlinks=True)
             copied += dir_size(p)
             print(f"  {name:<18}-> {human(dir_size(p))}")
     for l in PATHS["codex_logs"]:
         if l.exists():
-            safe_copy(l, dest / f"codex-{l.name}")
-            copied += l.stat().st_size
+            out = dest / f"codex-{l.name}"
+            try:
+                with closing(sqlite3.connect(l)) as src_con:
+                    with closing(sqlite3.connect(out)) as dst_con:
+                        src_con.backup(dst_con)
+            except sqlite3.Error:
+                safe_copy(l, out)
+            copied += out.stat().st_size
+    if PATHS["codex_state"].exists():
+        state_backup = dest / "codex-state.sqlite"
+        with closing(sqlite3.connect(PATHS["codex_state"])) as src_con:
+            with closing(sqlite3.connect(state_backup)) as dst_con:
+                src_con.backup(dst_con)
+        copied += state_backup.stat().st_size
 
     # OpenCode: DB (copia consistente), snapshot, tool-output, log
     if PATHS["opencode_db"].exists():
         db_backup = dest / "opencode.db"
-        sqlite3.connect(PATHS["opencode_db"]).backup(sqlite3.connect(db_backup))
+        with closing(sqlite3.connect(PATHS["opencode_db"])) as src_con:
+            with closing(sqlite3.connect(db_backup)) as dst_con:
+                src_con.backup(dst_con)
+                ok = dst_con.execute("PRAGMA integrity_check").fetchone()[0]
+                if ok != "ok":
+                    raise sqlite3.DatabaseError(f"backup opencode inválido: {ok}")
         copied += db_backup.stat().st_size
         print(f"  opencode.db       -> {human(db_backup.stat().st_size)}")
     for name in ("snapshot", "tool-output", "log"):
         p = PATHS["opencode_dir"] / name
         if p.exists() and dir_size(p) > 0:
-            shutil.copytree(p, dest / f"opencode-{name}", copy_function=safe_copy)
+            shutil.copytree(p, dest / f"opencode-{name}", copy_function=safe_copy,
+                            symlinks=True)
             copied += dir_size(p)
             print(f"  opencode-{name:<14}-> {human(dir_size(p))}")
 
     # Command Code
     if PATHS["commandcode"].exists():
         shutil.copytree(PATHS["commandcode"], dest / "commandcode",
-                        copy_function=safe_copy)
+                        copy_function=safe_copy, symlinks=True)
         copied += dir_size(PATHS["commandcode"])
         print(f"  commandcode       -> {human(dir_size(PATHS['commandcode']))}")
 
@@ -610,7 +867,7 @@ def backup(backup_dir):
             p = gem / sub
             if p.exists():
                 shutil.copytree(p, dest / f"gemini-{sub.replace('/', '-')}",
-                                copy_function=safe_copy)
+                                copy_function=safe_copy, symlinks=True)
                 copied += dir_size(p)
                 print(f"  gemini-{sub:<24}-> {human(dir_size(p))}")
         for brain in GEMINI_BRAIN_DIRS:
@@ -624,11 +881,24 @@ def backup(backup_dir):
                     transcripts += t.stat().st_size
         print(f"  gemini-transcripts -> {human(transcripts)}")
         copied += transcripts
+        for sub in ("antigravity", "antigravity-cli", "antigravity-ide"):
+            for junk in ("log", "crashes", "cache", "scratch"):
+                p = gem / sub / junk
+                if p.exists():
+                    out = dest / f"gemini-{sub}-{junk}"
+                    shutil.copytree(p, out, copy_function=safe_copy, symlinks=True)
+                    copied += dir_size(p)
+        recordings = gem / "antigravity-ide" / "browser_recordings"
+        if recordings.exists():
+            shutil.copytree(recordings, dest / "gemini-browser-recordings",
+                            copy_function=safe_copy, symlinks=True)
+            copied += dir_size(recordings)
     for app, name in ((PATHS["antigravity_app"], "antigravity-app"),
                       (PATHS["antigravity_ide_app"], "antigravity-ide-app")):
         p = app / "logs"
         if p.exists():
-            shutil.copytree(p, dest / f"{name}-logs", copy_function=safe_copy)
+            shutil.copytree(p, dest / f"{name}-logs", copy_function=safe_copy,
+                            symlinks=True)
             copied += dir_size(p)
             print(f"  {name}-logs      -> {human(dir_size(p))}")
 
@@ -640,43 +910,96 @@ def backup(backup_dir):
 # Aplicación de reducciones
 # ---------------------------------------------------------------------------
 
-def truncate_file_at_marker(f, markers, label):
+def truncate_file_at_marker(f, predicate, label):
     """Recorta el archivo quedándonos desde el último marcador (inclusive).
 
     Devuelve (bytes_recortados, tamaño_original, hecho, offset_del_marcador).
     El reemplazo es atómico (tmp + replace): si el script falla a mitad,
     el original queda intacto y solo sobra un archivo *.reclaim-tmp.
     """
-    size = f.stat().st_size
-    last_marker = -1
-    with open(f, "rb") as fh:
-        offset = 0
-        for raw in fh:
-            line = raw.decode("utf-8", errors="ignore")
-            if any(m in line for m in markers):
-                last_marker = offset
-            offset += len(raw)
-    if last_marker < 0:
+    f = Path(f)
+    try:
+        lst = f.lstat()
+    except OSError:
+        return 0, 0, False, -1
+    if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
+        print(f"  {f.name}: se omite porque no es un archivo regular")
+        return 0, lst.st_size, False, -1
+    size = lst.st_size
+    last_marker, error = find_last_marker(f, predicate)
+    if error:
+        print(f"  {f.name}: se omite ({error})")
+        return 0, size, False, -1
+    if last_marker <= 0:
         return 0, size, False, -1
     kept = size - last_marker
-    tmp = f.with_suffix(".jsonl.reclaim-tmp")
-    with open(f, "rb") as fh:
-        fh.seek(last_marker)
-        with open(tmp, "wb") as out:
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(f.parent), prefix=f".{f.name}.", suffix=".reclaim-tmp")
+    tmp = Path(tmp_name)
+    try:
+        with open(f, "rb") as fh, os.fdopen(fd, "wb") as out:
+            opened = os.fstat(fh.fileno())
+            fh.seek(last_marker)
             shutil.copyfileobj(fh, out)
-    tmp.replace(f)
+            out.flush()
+            os.fsync(out.fileno())
+            os.fchmod(out.fileno(), stat.S_IMODE(opened.st_mode))
+        shutil.copystat(f, tmp, follow_symlinks=False)
+        current = f.stat()
+        signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns)
+        if signature(opened) != signature(current):
+            raise RuntimeError(f"{f} cambió durante el recorte; no se reemplazó")
+        os.replace(str(tmp), str(f))
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            dir_fd = os.open(str(f.parent), flags)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+    finally:
+        if tmp.exists():
+            tmp.unlink()
     return size - kept, size, True, last_marker
 
 
 def write_manifest(entries):
     """Registro de cada cambio aplicado (fallback: saber qué se tocó y cuándo)."""
-    MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
+    MANIFEST_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        MANIFEST_DIR.chmod(0o700)
+    except OSError:
+        pass
     m = MANIFEST_DIR / f"manifest-{now()}.jsonl"
-    with open(m, "w") as fh:
+    fd = os.open(str(m), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         for e in entries:
             fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
     print(f"  {_('Manifiesto:')} {m}")
     return m
+
+
+def change_entry(tool, action, path, size, **extra):
+    entry = {"tool": tool, "action": action, "file": str(path),
+             "cut_bytes": size, "old_size": size, "marker_offset": -1,
+             "status": "applied", "time": now()}
+    entry.update(extra)
+    return entry
+
+
+def remove_path(path):
+    """Elimina un target exacto sin seguir symlinks; devuelve bytes retirados."""
+    path = Path(path)
+    size = dir_size(path)
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+    return size
 
 
 def apply_claude():
@@ -689,41 +1012,67 @@ def apply_claude():
         return 0, entries
     freed = 0
     for f in sorted(base.glob("*/*.jsonl")):
-        cut, size, done, marker = truncate_file_at_marker(f, CLAUDE_MARKERS, "claude")
+        if database_in_use(f) is not False:
+            print(f"  {f.name[:30]}... en uso o no verificable; se omite")
+            continue
+        cut, size, done, marker = truncate_file_at_marker(f, is_claude_compaction, "claude")
         if done:
             freed += cut
-            entries.append({"tool": "claude", "file": str(f),
+            entries.append({"tool": "claude", "action": "truncate", "file": str(f),
                             "cut_bytes": cut, "old_size": size,
-                            "marker_offset": marker, "time": now()})
+                            "marker_offset": marker, "status": "applied", "time": now()})
             print(f"  {Path(f).name[:14]}... {human(cut)} de {human(size)} {_('recortados')}")
 
-    # Subagentes hijos (transcripts de un solo uso del modo ultra/plan etc.)
-    # Se conservan los agent-acompact (resúmenes de compactación) y los memory/.
+    # Sidechains de un solo uso; memory/ y el transcript principal no se tocan.
     sub_n = sub_bytes = 0
-    for p in base.rglob("subagents/agent-*.jsonl"):
-        if "acompact" in p.name:
-            continue
-        sub_bytes += p.stat().st_size
+    subagents = [p for p in base.rglob("subagents/agent-*.jsonl")
+                 if claude_subagent_info(p) and database_in_use(p) is False]
+    if subagents:
+        preview_bytes = sum(p.stat().st_size for p in subagents)
+        print(f"  AVISO: se eliminarán {len(subagents)} transcripts de subagentes "
+              f"Claude cerrados ({human(preview_bytes)}); son artefactos de un solo uso.")
+    for p in subagents:
+        size = p.stat().st_size
+        sub_bytes += size
         sub_n += 1
         p.unlink()
+        entries.append({"tool": "claude", "action": "delete_subagent",
+                        "file": str(p), "cut_bytes": size, "old_size": size,
+                        "marker_offset": -1, "time": now()})
         meta = p.with_name(p.name.replace(".jsonl", "") + ".meta.json")
         if meta.exists():
+            meta_size = meta.stat().st_size
             meta.unlink()
+            sub_bytes += meta_size
+            sub_n += 1
+            entries.append({"tool": "claude", "action": "delete_subagent_meta",
+                            "file": str(meta), "cut_bytes": meta_size,
+                            "old_size": meta_size, "marker_offset": -1,
+                            "time": now()})
     for meta in base.rglob("subagents/agent-*.meta.json"):
-        if "acompact" in meta.name:
+        sibling = meta.with_name(meta.name.replace(".meta.json", ".jsonl"))
+        if sibling.exists() or database_in_use(meta) is not False:
             continue
         sub_bytes += meta.stat().st_size
         sub_n += 1
+        size = meta.stat().st_size
         meta.unlink()
+        entries.append({"tool": "claude", "action": "delete_subagent_meta",
+                        "file": str(meta), "cut_bytes": size, "old_size": size,
+                        "marker_offset": -1, "time": now()})
     for wf in base.rglob("subagents/workflows"):
-        sub_bytes += dir_size(wf)
+        if database_in_use(wf) is not False:
+            print(f"  {wf}: en uso o no verificable; se omite")
+            continue
+        size = dir_size(wf)
+        sub_bytes += size
         shutil.rmtree(wf)
+        entries.append({"tool": "claude", "action": "delete_workflows",
+                        "file": str(wf), "cut_bytes": size, "old_size": size,
+                        "marker_offset": -1, "time": now()})
     if sub_n:
         print(f"  {_('subagentes eliminados:')} {sub_n} {_('archivos,')} {human(sub_bytes)}")
-        entries.append({"tool": "claude", "file": "subagents/*",
-                        "cut_bytes": sub_bytes, "old_size": sub_bytes,
-                        "marker_offset": -1, "time": now(),
-                        "note": f"subagent transcripts ({sub_n} files)"})
+    freed += sub_bytes
     return freed, entries
 
 
@@ -734,69 +1083,150 @@ def apply_codex():
     if not base.exists():
         return 0, entries
     for f in sorted(base.rglob("*.jsonl")):
-        cut, size, done, marker = truncate_file_at_marker(f, (CODEX_MARKER,), "codex")
+        if codex_subagent_info(f):
+            continue
+        if database_in_use(f) is not False:
+            print(f"  {f.name[:30]}... en uso o no verificable; se omite")
+            continue
+        cut, size, done, marker = truncate_file_at_marker(f, is_codex_compaction, "codex")
         if done:
             freed += cut
-            entries.append({"tool": "codex", "file": str(f),
+            entries.append({"tool": "codex", "action": "truncate", "file": str(f),
                             "cut_bytes": cut, "old_size": size,
-                            "marker_offset": marker, "time": now()})
+                            "marker_offset": marker, "status": "applied", "time": now()})
             print(f"  {Path(f).name[:30]}... {human(cut)} de {human(size)} {_('recortados')}")
+
+    candidates = []
+    for f in sorted(base.rglob("*.jsonl")):
+        info = codex_subagent_info(f)
+        if info and not codex_subagent_is_active(info["thread_id"], f):
+            candidates.append((f, info, f.stat().st_size))
+    if candidates:
+        total = sum(item[2] for item in candidates)
+        print(f"  AVISO: se eliminarán {len(candidates)} transcripts de subagentes "
+              f"Codex cerrados ({human(total)}); son artefactos de un solo uso.")
+    for path, info, size in candidates:
+        ok, reason = delete_codex_subagent(path, info)
+        if ok:
+            freed += size
+            entries.append(change_entry("codex", "delete_subagent", path, size,
+                                        thread_id=info["thread_id"]))
+        else:
+            print(f"  subagente {info['thread_id'][:12]}... se omite: {reason}")
     return freed, entries
 
 
+def delete_codex_subagent(path, info):
+    """Elimina un subagente cerrado y mantiene coherente el índice de Codex."""
+    thread_id = info["thread_id"]
+    if codex_subagent_is_active(thread_id, path):
+        return False, "sigue activo"
+    state = PATHS["codex_state"]
+    if not state.exists():
+        return False, "no existe el índice state_5.sqlite"
+    con = None
+    try:
+        con = sqlite3.connect(state, timeout=0)
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute(
+            "SELECT status FROM thread_spawn_edges WHERE child_thread_id=?",
+            (thread_id,)).fetchone()
+        open_children = con.execute(
+            "SELECT 1 FROM thread_spawn_edges WHERE parent_thread_id=? AND status='open' LIMIT 1",
+            (thread_id,)).fetchone()
+        if (row and row[0] == "open") or open_children:
+            con.rollback()
+            return False, "él o uno de sus hijos sigue activo"
+        con.execute("DELETE FROM thread_dynamic_tools WHERE thread_id=?", (thread_id,))
+        con.execute("DELETE FROM thread_spawn_edges WHERE child_thread_id=? OR parent_thread_id=?",
+                    (thread_id, thread_id))
+        con.execute("DELETE FROM threads WHERE id=? AND thread_source='subagent'", (thread_id,))
+        con.commit()
+    except sqlite3.Error as exc:
+        if con is not None:
+            con.rollback()
+        return False, f"índice ocupado o incompatible ({exc})"
+    finally:
+        if con is not None:
+            con.close()
+
+    try:
+        Path(path).unlink()
+    except OSError as exc:
+        return False, f"metadatos retirados, pero no se pudo borrar el rollout ({exc})"
+
+    for log_db in PATHS["codex_logs"]:
+        if not log_db.exists():
+            continue
+        try:
+            with closing(sqlite3.connect(log_db, timeout=0)) as log_con:
+                table = log_con.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='logs'").fetchone()
+                cols = {r[1] for r in log_con.execute("PRAGMA table_info(logs)")} if table else set()
+                if "thread_id" in cols:
+                    log_con.execute("DELETE FROM logs WHERE thread_id=?", (thread_id,))
+                    log_con.commit()
+        except sqlite3.Error:
+            pass
+    return True, None
+
+
 def apply_opencode_files():
-    """Snapshots huérfanos + tool-output + logs (seguro sin cerrar opencode)."""
+    """Todos los snapshots + tool-output + logs."""
     freed = 0
+    entries = []
     snap = PATHS["opencode_dir"] / "snapshot"
     if snap.exists():
-        sz = dir_size(snap)
+        print("  AVISO: se eliminarán todos los snapshots locales de OpenCode.")
         for child in snap.iterdir():
-            shutil.rmtree(child)
-        freed += sz
-        print(f"  {_('snapshots huérfanos:')} {human(sz)}")
+            sz = remove_path(child)
+            freed += sz
+            entries.append(change_entry("opencode", "delete_snapshot", child, sz))
+        print(f"  snapshots eliminados: {human(freed)}")
     tool = PATHS["opencode_dir"] / "tool-output"
     if tool.exists():
-        sz = dir_size(tool)
         for child in tool.iterdir():
-            if child.is_file():
-                child.unlink()
-        freed += sz
-        print(f"  tool-output: {human(sz)}")
+            sz = remove_path(child)
+            freed += sz
+            entries.append(change_entry("opencode", "delete_tool_output", child, sz))
+        print(f"  tool-output eliminado")
     log = PATHS["opencode_dir"] / "log"
     if log.exists():
-        sz = dir_size(log)
-        shutil.rmtree(log)
+        sz = remove_path(log)
         freed += sz
+        entries.append(change_entry("opencode", "delete_logs", log, sz))
         print(f"  logs: {human(sz)}")
-    return freed
+    return freed, entries
 
 
 def apply_codex_cache():
     freed = 0
+    entries = []
     if PATHS["codex_cache"].exists():
-        sz = dir_size(PATHS["codex_cache"])
-        shutil.rmtree(PATHS["codex_cache"])
+        sz = remove_path(PATHS["codex_cache"])
         freed += sz
+        entries.append(change_entry("codex", "delete_cache", PATHS["codex_cache"], sz))
         print(f"  {_('codex cache:')} {human(sz)}")
     for l in PATHS["codex_logs"]:
         if l.exists():
+            if database_in_use(l) is not False:
+                print(f"  {l.name}: en uso o no verificable; se omite")
+                continue
             sz = l.stat().st_size
             l.unlink()
             freed += sz
+            entries.append(change_entry("codex", "delete_log_db", l, sz))
             print(f"  {l.name}: {human(sz)}")
-    return freed
+    return freed, entries
 
 
-def prune_opencode_db(backup_dir=None, no_backup=False):
-    """Poda del opencode.db: requiere que opencode esté cerrado.
+def chunks(values, size=400):
+    for start in range(0, len(values), size):
+        yield values[start:start + size]
 
-    Hace lo del proyecto opencode-db-prune (eventos redundantes) + poda
-    pre-compactación. No toca la sesión de auditoría: solo recorta lo
-    anterior a su última compactación.
 
-    Es destructivo e irreversible: exige un respaldo explícito
-    (--backup-dir) o aceptar el riesgo (--no-backup).
-    """
+def prune_opencode_db(backup_dir=None, no_backup=False, close_opencode=False):
+    """Poda OpenCode bajo bloqueo SQLite, una transacción y verificación."""
     db = PATHS["opencode_db"]
     if not db.exists():
         print(f"  {_('no existe opencode.db')}")
@@ -805,106 +1235,143 @@ def prune_opencode_db(backup_dir=None, no_backup=False):
         print(f"  {_('REFUSED: apply-db borra datos de forma irreversible (eventos + mensajes).')}")
         print(f"  {_('Pasa --backup-dir <disco> para respaldar la DB o --no-backup si aceptas el riesgo.')}")
         return 7
-    if backup_dir:
-        dest = Path(backup_dir) / f"conversation-reclaim-{now()}"
-        dest.mkdir(parents=True, exist_ok=True)
-        db_backup = dest / "opencode.db"
-        sqlite3.connect(db).backup(sqlite3.connect(db_backup))
-        print(f"  {_('Backup en:')} {db_backup} ({human(db_backup.stat().st_size)})")
-    else:
-        print("  --no-backup: no hay copia de la DB. El manifiesto queda en ~/.conversation-reclaim/.")
-    if _IS_WIN:
-        print("  Windows: la detección de archivo en uso no está disponible.")
-        print("  Asegúrate de que opencode esté completamente cerrado.")
-    else:
+    if not _IS_WIN:
         in_use = database_in_use(db)
-        if in_use:
-            print(f"  {_('REFUSED: opencode.db está abierto (opencode corriendo).')}")
-            print(f"  {_('Cierra opencode y vuelve a ejecutar:')}  python3 reclaim.py apply-db")
+        if in_use and close_opencode:
+            if not close_opencode_for_cleanup(db):
+                return 2
+            in_use = database_in_use(db)
+        if in_use is not False:
+            detail = "está abierto" if in_use else "no se pudo comprobar su uso"
+            print(f"  REFUSED: opencode.db {detail}.")
+            if in_use:
+                print("  Reintenta con --close-opencode para avisar y cerrar OpenCode de forma normal.")
             return 2
-    con = sqlite3.connect(db)
-    cur = con.cursor()
+    else:
+        print("  Windows: asegúrate de que opencode esté completamente cerrado.")
 
-    # Pre-flight: el contenido final vive en part, no solo en event
-    row = cur.execute("select id from session order by time_created asc limit 1").fetchone()
-    if row:
-        parts = cur.execute(
-            "select count(*) from part where message_id in "
-            "(select id from message where session_id=?)", (row[0],)).fetchone()[0]
-        text = cur.execute(
-            "select 1 from part where message_id in "
-            "(select id from message where session_id=?) "
-            "and json_extract(data,'$.type')='text' "
-            "and length(json_extract(data,'$.text'))>20 limit 1", (row[0],)).fetchone()
-        if parts == 0 or not text:
-            print(f"  {_('REFUSED: el contenido solo existe en la tabla event. No se toca.')}")
-            con.close()
-            return 3
+    backup_path = None
+    if backup_dir:
+        try:
+            dest = Path(backup_dir).expanduser().resolve() / f"conversation-reclaim-{now()}"
+            dest.mkdir(parents=True, exist_ok=False)
+            backup_path = dest / "opencode.db"
+            with closing(sqlite3.connect(db)) as src_con:
+                with closing(sqlite3.connect(backup_path)) as dst_con:
+                    src_con.backup(dst_con)
+                    if dst_con.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                        raise sqlite3.DatabaseError("integridad del respaldo inválida")
+            print(f"  {_('Backup en:')} {backup_path} ({human(backup_path.stat().st_size)})")
+        except (OSError, sqlite3.Error) as exc:
+            print(f"  REFUSED: no se pudo crear/verificar el respaldo: {exc}")
+            return 4
+    else:
+        print("  --no-backup: no hay copia de la DB; se escribirá un manifiesto.")
 
     size_before = db.stat().st_size
-    print(f"  {_('tamaño antes:')} {human(size_before)}")
+    con = sqlite3.connect(db, timeout=0)
+    con.execute("PRAGMA foreign_keys=ON")
+    cur = con.cursor()
+    try:
+        if cur.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            print("  REFUSED: la DB ya falla integrity_check.")
+            return 6
 
-    # 1) Eventos redundantes (snapshots de streaming duplicados)
-    red = cur.execute(
-        f"SELECT count(*), coalesce(sum(length(data)),0) FROM event "
-        f"WHERE type IN ({','.join('?'*3)})", OPENCODE_REDUNDANT_EVENTS).fetchone()
-    print(f"  {_('eventos redundantes:')} {red[0]:,} {_('filas')}, {human(red[1])}")
-    if red[0]:
-        cur.execute(f"DELETE FROM event WHERE type IN ({','.join('?'*3)})",
-                    OPENCODE_REDUNDANT_EVENTS)
-        con.commit()
-        print(f"  {_('borrados')} {red[0]:,} {_('eventos redundantes')}")
+        # Antes de retirar el event log, cada sesión debe tener parts materializados.
+        unsafe = cur.execute(
+            "SELECT s.id FROM session s WHERE EXISTS (SELECT 1 FROM message m WHERE m.session_id=s.id) "
+            "AND NOT EXISTS (SELECT 1 FROM part p JOIN message m ON m.id=p.message_id "
+            "WHERE m.session_id=s.id) LIMIT 1").fetchone()
+        if unsafe:
+            print(f"  {_('REFUSED: el contenido solo existe en la tabla event. No se toca.')}")
+            return 3
 
-    # 2) Poda pre-compactación (mensajes/parts/eventos anteriores a la última)
-    rows = cur.execute(
-        "SELECT session_id, data FROM part WHERE json_extract(data,'$.type')='compaction'"
-    ).fetchall()
-    comps = defaultdict(list)
-    for sid, data in rows:
-        comps[sid].append(json.loads(data))
-    for sess, clist in comps.items():
-        tail = clist[-1].get("tail_start_id")
-        if not tail:
-            continue
-        msgs = cur.execute(
-            "SELECT id FROM message WHERE session_id=? ORDER BY time_created, id",
-            (sess,)).fetchall()
-        ids = [m[0] for m in msgs]
-        try:
+        rows = cur.execute(
+            "SELECT session_id, id, data FROM part "
+            "WHERE json_extract(data,'$.type')='compaction' "
+            "ORDER BY session_id, time_created, id").fetchall()
+        latest = {}
+        for sid, _part_id, data in rows:
+            try:
+                parsed = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                latest[sid] = parsed
+
+        plans = []
+        for sess, compaction in latest.items():
+            tail = compaction.get("tail_start_id")
+            ids = [r[0] for r in cur.execute(
+                "SELECT id FROM message WHERE session_id=? ORDER BY time_created, id",
+                (sess,)).fetchall()]
+            if not tail or tail not in ids:
+                print(f"  sesión {str(sess)[:14]}...: marcador inválido; se omite")
+                continue
             idx = ids.index(tail)
-        except ValueError:
-            continue
-        waste = ids[:idx]
-        if not waste:
-            continue
-        q = ",".join("?" * len(waste))
-        pids = [r[0] for r in cur.execute(
-            f"SELECT id FROM part WHERE message_id IN ({q})", waste).fetchall()]
-        if pids:
-            q2 = ",".join("?" * len(pids))
-            cur.execute(f"DELETE FROM event WHERE json_extract(data,'$.part.id') IN ({q2})", pids)
-        cur.execute(f"DELETE FROM part WHERE message_id IN ({q})", waste)
-        cur.execute(f"DELETE FROM message WHERE id IN ({q})", waste)
-        con.commit()
-        print(f"  {_('sesión')} {sess[:14]}...: {len(waste)} {_('mensajes pre-compactación podados')}")
+            if idx and cur.execute(
+                    "SELECT 1 FROM part WHERE message_id IN "
+                    "(SELECT id FROM message WHERE session_id=?) LIMIT 1", (sess,)).fetchone():
+                plans.append((sess, ids[:idx]))
 
-    print(f"  {_('VACUUM (puede tardar)...')}")
-    cur.execute("VACUUM")
-    ok = cur.execute("PRAGMA integrity_check").fetchone()[0]
-    con.close()
+        red = cur.execute(
+            f"SELECT count(*), coalesce(sum(length(data)),0) FROM event "
+            f"WHERE type IN ({','.join('?' * len(OPENCODE_REDUNDANT_EVENTS))})",
+            OPENCODE_REDUNDANT_EVENTS).fetchone()
+        print(f"  {_('tamaño antes:')} {human(size_before)}")
+        print(f"  {_('eventos redundantes:')} {red[0]:,} {_('filas')}, {human(red[1])}")
+
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute(f"DELETE FROM event WHERE type IN "
+                    f"({','.join('?' * len(OPENCODE_REDUNDANT_EVENTS))})",
+                    OPENCODE_REDUNDANT_EVENTS)
+        pruned_messages = 0
+        for sess, waste in plans:
+            pids = []
+            for batch in chunks(waste):
+                q = ",".join("?" * len(batch))
+                pids.extend(r[0] for r in cur.execute(
+                    f"SELECT id FROM part WHERE message_id IN ({q})", batch))
+            for batch in chunks(pids):
+                q = ",".join("?" * len(batch))
+                cur.execute(f"DELETE FROM event WHERE json_extract(data,'$.part.id') IN ({q})", batch)
+            for batch in chunks(waste):
+                q = ",".join("?" * len(batch))
+                cur.execute(f"DELETE FROM part WHERE message_id IN ({q})", batch)
+                cur.execute(f"DELETE FROM message WHERE id IN ({q})", batch)
+            pruned_messages += len(waste)
+            print(f"  sesión {str(sess)[:14]}...: {len(waste)} mensajes pre-compactación podados")
+        con.commit()
+        print(f"  {_('VACUUM (puede tardar)...')}")
+        cur.execute("VACUUM")
+        ok = cur.execute("PRAGMA integrity_check").fetchone()[0]
+    except sqlite3.Error as exc:
+        con.rollback()
+        print(f"  REFUSED/ROLLBACK: {exc}")
+        return 2 if "locked" in str(exc).lower() else 5
+    finally:
+        con.close()
+
     size_after = db.stat().st_size
+    entry = change_entry("opencode", "prune_database", db,
+                         max(0, size_before - size_after),
+                         redundant_events=red[0], messages=pruned_messages,
+                         backup_path=str(backup_path) if backup_path else None,
+                         integrity=ok)
+    write_manifest([entry])
     print(f"  {_('integridad:')} {ok}")
     print(f"  {_('tamaño antes:')} {human(size_before)} -> {human(size_after)} "
           f"({_('liberado')} {human(size_before - size_after)})")
-    return 0
+    return 0 if ok == "ok" else 6
 
 
 def apply_antigravity(steps=True):
     """Antigravity: recorta transcripts en el último marcador de compactación,
     poda los pasos pre-compactación de las DB de conversación (si steps=True)
-    y limpia logs/crashes/cache. Todo debe estar respaldado antes."""
+    y limpia logs/crashes/cache. El respaldo externo es opcional."""
     gem = PATHS["gemini"]
     freed = 0
+    entries = []
 
     # 1) Transcripts: quedarse desde el último CONVERSATION_HISTORY
     for brain in GEMINI_BRAIN_DIRS:
@@ -914,23 +1381,19 @@ def apply_antigravity(steps=True):
         for t in bdir.rglob("transcript*.jsonl"):
             if not t.is_file():
                 continue
-            size = t.stat().st_size
-            last_marker = -1
-            with open(t, "rb") as fh:
-                offset = 0
-                for raw in fh:
-                    if b'"type":"CONVERSATION_HISTORY"' in raw:
-                        last_marker = offset
-                    offset += len(raw)
-            if last_marker > 0:
-                tmp = t.with_suffix(".jsonl.reclaim-tmp")
-                with open(t, "rb") as fh, open(tmp, "wb") as out:
-                    fh.seek(last_marker)
-                    shutil.copyfileobj(fh, out)
-                tmp.replace(t)
-                freed += last_marker
+            if database_in_use(t) is not False:
+                print(f"  {t.name}: en uso o no verificable; se omite")
+                continue
+            cut, size, done, marker = truncate_file_at_marker(
+                t, is_antigravity_compaction, "antigravity")
+            if done:
+                freed += cut
+                entries.append({"tool": "antigravity", "action": "truncate_transcript",
+                                "file": str(t), "cut_bytes": cut,
+                                "old_size": size, "marker_offset": marker,
+                                "status": "applied", "time": now()})
                 print(f"  transcript {Path(t).parent.parent.name[:8]}... "
-                      f"{human(last_marker)} {_('recortados')}")
+                      f"{human(cut)} {_('recortados')}")
 
     # 2) DBs de conversación: podar pasos anteriores a la última compactación
     if steps:
@@ -941,35 +1404,52 @@ def apply_antigravity(steps=True):
             for db in d.glob("*.db"):
                 if db.name.endswith((".db-shm", "-wal")):
                     continue
-                if database_in_use(db):
+                if database_in_use(db) is not False:
                     print(f"  {db.name[:12]}... {_('en uso, se omite')}")
                     continue
+                con = None
                 try:
-                    con = sqlite3.connect(db)
+                    con = sqlite3.connect(db, timeout=0)
+                    con.execute("BEGIN IMMEDIATE")
                     mark = con.execute(
                         "SELECT idx FROM steps WHERE step_type=? ORDER BY idx DESC LIMIT 1",
                         (ANTIGRAVITY_COMPACT_STEP,)).fetchone()
                     if not mark or mark[0] == 0:
-                        con.close()
+                        con.rollback()
                         continue
                     idx = mark[0]
-                    before = sum(r[0] for r in con.execute(
-                        "SELECT length(step_payload) FROM steps WHERE idx<?", (idx,)))
+                    before = con.execute(
+                        "SELECT coalesce(sum(length(step_payload)),0) FROM steps WHERE idx<?",
+                        (idx,)).fetchone()[0]
                     if before == 0:
-                        con.close()
+                        con.rollback()
                         continue
                     for table in ("steps", "gen_metadata", "executor_metadata",
                                   "parent_references", "battle_mode_infos"):
-                        con.execute(f"DELETE FROM {table} WHERE idx<?", (idx,))
+                        columns = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+                        if "idx" in columns:
+                            con.execute(f"DELETE FROM {table} WHERE idx<?", (idx,))
                     con.commit()
                     con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                     con.execute("VACUUM")
-                    con.close()
+                    ok = con.execute("PRAGMA integrity_check").fetchone()[0]
+                    entries.append(change_entry(
+                        "antigravity", "prune_steps", db, before,
+                        marker_offset=idx, integrity=ok,
+                        status="applied" if ok == "ok" else "integrity_failed"))
+                    if ok != "ok":
+                        print(f"  {db.name[:12]}... integridad: {ok}")
+                        continue
                     freed += before
                     print(f"  {sub}/{db.name[:12]}... {human(before)} "
                           f"({idx} {_('pasos pre-compactación podados')})")
                 except sqlite3.Error as e:
+                    if con is not None:
+                        con.rollback()
                     print(f"  {db.name[:12]}... error: {e}")
+                finally:
+                    if con is not None:
+                        con.close()
 
     # 3) Logs, crashes y caches de los componentes .gemini
     for sub in ("antigravity", "antigravity-cli", "antigravity-ide"):
@@ -977,16 +1457,22 @@ def apply_antigravity(steps=True):
             p = gem / sub / junk
             if p.exists():
                 sz = dir_size(p)
-                shutil.rmtree(p)
+                remove_path(p)
                 freed += sz
+                entries.append(change_entry("antigravity", f"delete_{junk}", p, sz))
                 print(f"  .gemini/{sub}/{junk}: {human(sz)}")
 
     # 4) browser_recordings (imágenes del modo browser, meses de antigüedad)
     rec = gem / "antigravity-ide" / "browser_recordings"
     if rec.exists():
         sz = dir_size(rec)
-        shutil.rmtree(rec)
+        files = sum(1 for p in rec.rglob("*") if p.is_file())
+        print(f"  AVISO: se eliminarán {files} browser recordings ({human(sz)}). "
+              "Son capturas ya usadas por Antigravity y no se reutilizan.")
+        remove_path(rec)
         freed += sz
+        entries.append(change_entry("antigravity", "delete_browser_recordings", rec, sz,
+                                    file_count=files))
         print(f"  browser_recordings: {human(sz)}")
 
     # 4) Logs de las apps de escritorio
@@ -995,17 +1481,22 @@ def apply_antigravity(steps=True):
         p = app / "logs"
         if p.exists():
             sz = dir_size(p)
-            shutil.rmtree(p)
+            remove_path(p)
             freed += sz
+            entries.append(change_entry("antigravity", "delete_app_logs", p, sz))
             print(f"  {name} (logs): {human(sz)}")
-    return freed
+    return freed, entries
 
 
 def apply(args):
     manifest = []
     dest = None
     if args.backup_dir:
-        dest = backup(args.backup_dir)
+        try:
+            dest = backup(args.backup_dir)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            print(f"  REFUSED: el respaldo falló; no se aplicó ningún cambio: {exc}")
+            return 4
     else:
         print()
         print(f"  {_('Sin respaldo externo (usa --backup-dir <disco> para uno completo).')}")
@@ -1025,15 +1516,25 @@ def apply(args):
         freed += f
         manifest += e
     if only in (None, "opencode"):
-        freed += apply_opencode_files()
+        f, e = apply_opencode_files()
+        freed += f
+        manifest += e
     if only in (None, "codex"):
-        freed += apply_codex_cache()
+        f, e = apply_codex_cache()
+        freed += f
+        manifest += e
     if only in (None, "antigravity"):
-        freed += apply_antigravity(steps=not args.no_antigravity_steps)
+        f, e = apply_antigravity(steps=not args.no_antigravity_steps)
+        freed += f
+        manifest += e
     if only == "caches":
-        freed += apply_opencode_files()
-        freed += apply_codex_cache()
-        freed += apply_antigravity(steps=False)
+        for fn in (apply_opencode_files, apply_codex_cache):
+            f, e = fn()
+            freed += f
+            manifest += e
+        f, e = apply_antigravity(steps=False)
+        freed += f
+        manifest += e
     if manifest:
         m = write_manifest(manifest)
         print(f"  ({len(manifest)} {_('cambios registrados en')} {m})")
@@ -1042,6 +1543,7 @@ def apply(args):
     print(f"        {_('Cuando cierres opencode:')}  python3 reclaim.py apply-db --backup-dir <disco>")
     if dest:
         print(f"        {_('Respaldo completo en:')} {dest}")
+    return 0
 
 
 def restore(backup_dir):
@@ -1049,20 +1551,27 @@ def restore(backup_dir):
     print(f"{_('Copia los directorios según lo que quieras recuperar:')}")
     print("  claude-projects/  -> ~/.claude/projects")
     print("  codex-sessions/   -> ~/.codex/sessions")
+    print("  codex-archived/   -> ~/.codex/archived_sessions")
+    print("  codex-cache/      -> ~/.codex/cache")
+    print("  codex-state.sqlite -> ~/.codex/state_5.sqlite (Codex cerrado)")
     print(f"  opencode.db       -> ~/.local/share/opencode/opencode.db {_('(opencode cerrado)')}")
     print("  opencode-snapshot/-> ~/.local/share/opencode/snapshot")
     print("  opencode-tool-output/ -> ~/.local/share/opencode/tool-output")
     print("  commandcode/      -> ~/.commandcode/projects")
+    print("  gemini-*/         -> subrutas correspondientes bajo ~/.gemini")
+    print("  gemini-browser-recordings/ -> ~/.gemini/antigravity-ide/browser_recordings")
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description="conversation-reclaim v" + VERSION)
     ap.add_argument("mode", nargs="?", default="scan",
-                    choices=["scan", "apply", "apply-db", "restore", "skills"])
+                    choices=["scan", "apply", "apply-db", "restore", "skills", "gui"])
     ap.add_argument("--backup-dir", default=None,
                     help="destino del respaldo completo (opcional; disco externo recomendado)")
     ap.add_argument("--no-backup", action="store_true",
                     help="aplicar apply-db sin respaldo de la DB (asumir el riesgo)")
+    ap.add_argument("--close-opencode", action="store_true",
+                    help="avisar y cerrar OpenCode si bloquea apply-db (nunca cierra el host actual)")
     ap.add_argument("--no-antigravity-steps", action="store_true",
                     help="no podar los pasos pre-compactación en las DB de Antigravity")
     ap.add_argument("--only", default=None,
@@ -1071,13 +1580,14 @@ def main():
                     help="aplicar reducciones solo a esta herramienta")
     ap.add_argument("--lang", default=None, choices=["es", "en"],
                     help="idioma de salida (por defecto: $LANG, español si no se detecta)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     if args.lang:
         globals()["EN"] = args.lang == "en"
 
     if args.mode == "scan":
         scan()
+        return 0
     elif args.mode == "skills":
         sk = scan_skills()
         print(f"{_('Skills:')} {sk['n']} {_('totales,')} {human(sk['total'])}")
@@ -1096,13 +1606,19 @@ def main():
                 if links:
                     print(f"    {_('ya symlink'):>9}  {', '.join(r for r, _x, _y in links)}")
             print(f"  {_('→ Sugerencia: conservar una canonical y symlink desde las otras.')}")
+        return 0
     elif args.mode == "apply":
-        apply(args)
+        return apply(args)
     elif args.mode == "apply-db":
-        prune_opencode_db(args.backup_dir, args.no_backup)
+        return prune_opencode_db(args.backup_dir, args.no_backup, args.close_opencode)
     elif args.mode == "restore":
         restore(args.backup_dir or str(HOME / "respaldos-ia"))
+        return 0
+    elif args.mode == "gui":
+        from gui import main as gui_main
+        return gui_main()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

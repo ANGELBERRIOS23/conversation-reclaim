@@ -30,29 +30,39 @@ screenshots, and agents copy the same skills into four different folders.
 
 This tool detects the **last compaction marker** of every conversation and
 trims everything before it — keeping the summary and the recent messages
-intact. Then it cleans the other safe stuff: orphan snapshots, tool-outputs,
-logs, caches, browser recordings. **Always after a full backup.**
+intact. Then it cleans the other disposable data: snapshots, tool-outputs,
+logs, caches, browser recordings and closed subagent transcripts. It previews
+these destructive categories first; a full external backup is optional.
 
 ## Designed for AI agents — and for humans
 
-Two ways to use it:
+Three ways to use it:
 
 1. **By an AI agent (recommended)** — the repo ships an agent skill
    (`skills/conversation-reclaim/SKILL.md`). Install it and just tell your
    agent *"libera espacio de mis conversaciones"* (or *"free up space from my
    conversations"* — the tool speaks your language). The skill knows the
-   markers, the safety rules and the backup-first workflow. This is how the
+   markers, the safety rules and the preview-first workflow. This is how the
    author uses it.
-2. **Manually from a terminal** — a plain, single-file Python CLI (stdlib
+2. **Visual interface** — run `python3 reclaim.py gui` on macOS/Linux or
+   `py reclaim.py gui` on Windows. The dashboard measures each category,
+   preselects recommended cleanup, explains what is preserved, lets you uncheck
+   anything, offers an external backup, and asks for confirmation before writes.
+   You can also double-click `launch-gui.command` on macOS or `launch-gui.bat`
+   on Windows. It uses Python/Tk already bundled with normal Python installers;
+   no Flutter, Go, Node or web server is required.
+3. **Manually from a terminal** — a plain Python CLI (stdlib
    only), no dependencies, no install. Run `scan` first, review the numbers,
    then `apply` with a backup destination:
 
 ```bash
+python3 reclaim.py gui                    # visual review and cleanup
 python3 reclaim.py scan                    # read-only estimate
 python3 reclaim.py apply                   # apply; writes a change manifest to ~/.conversation-reclaim/
 python3 reclaim.py apply --backup-dir /Volumes/DISCO/respaldos-ia   # optional full backup first
 python3 reclaim.py apply --only antigravity   # one tool only
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO   # prune opencode.db (opencode closed, backup required or --no-backup)
+python3 reclaim.py apply-db --no-backup --close-opencode  # warn, quit OpenCode normally, then prune
 python3 reclaim.py skills                  # list skills + find duplicates
 python3 reclaim.py restore --backup-dir /ruta
 ```
@@ -73,10 +83,10 @@ English and it answers in English.
 
 | Tool | Storage | Compaction marker | What `apply` does |
 |---|---|---|---|
-| **Claude Code** | `~/.claude/projects/**/*.jsonl` | line with `Conversation compacted` / `compactMetadata` | trims everything before the last marker |
-| **Codex** | `~/.codex/sessions/**/rollout-*.jsonl` | event `"type":"compacted"` | same |
+| **Claude Code** | `~/.claude/projects/**/*.jsonl` | structured summary/compaction event | trims before the last marker + removes closed sidechains |
+| **Codex** | `~/.codex/sessions/**/rollout-*.jsonl` | top-level event `"type":"compacted"` | same + removes closed subagent rollouts/index rows |
 | **OpenCode** | `~/.local/share/opencode/opencode.db` | part `type=compaction` with `tail_start_id` | `apply-db`: redundant streaming events + pre-compaction messages + VACUUM |
-| **OpenCode (files)** | `snapshot/`, `tool-output/`, `log/` | — | orphan snapshots, tool outputs, logs |
+| **OpenCode (files)** | `snapshot/`, `tool-output/`, `log/` | — | all local snapshots, tool outputs, logs |
 | **Antigravity / Gemini** | `~/.gemini/antigravity{,,-cli,-ide}/conversations/*.db` | steps `step_type 98` (CONVERSATION_HISTORY) | prunes pre-compaction steps + transcripts, scratch, logs, caches, `browser_recordings` |
 | **Command Code** | `~/.commandcode/projects/` | none detected | scan/backup only |
 
@@ -98,10 +108,24 @@ project (use it directly if you only care about the DB).
   run leaves originals intact — see the skill for manual fallback recipes).
 - `apply-db` requires an explicit backup (`--backup-dir`) or `--no-backup`.
 - Refuses to touch `opencode.db` while opencode is running.
+- `--close-opencode` warns and requests a normal macOS app quit before pruning.
+  It refuses when OpenCode is an ancestor/host of the running command, so it
+  never terminates the agent executing the cleanup. Run that command from
+  Terminal, Codex or another external harness.
 - Pre-flight check: won't delete events if the content only lives in the event
   table.
 - Integrity checks (`PRAGMA integrity_check`) after DB operations.
 - Antigravity conversation DBs are skipped if the app has them open.
+- Closed Codex subagents are identified from structured `session_meta`; active
+  children are preserved whenever a writer lock or open spawn edge exists.
+- Claude sidechains, including `agent-acompact-*`, are validated from their
+  JSON metadata and deleted only when they are not open.
+- Before deleting subagent transcripts or Antigravity `browser_recordings`,
+  the CLI prints their count and size. Browser recordings are already-consumed
+  screenshots and Antigravity does not reuse them.
+- Cleanup may run from inside Codex: the current task, locked rollouts and live
+  log databases are skipped, while closed histories and other disposable data
+  remain eligible. A later run can reclaim the current task after it closes.
 - Skills are **only listed**, never deleted (duplicates can be deduplicated
   with symlinks).
 - Caches (tool-output, logs, snapshots, scratch) are safe to delete — prompt
@@ -126,8 +150,9 @@ manually:
 
 Notes for Windows users:
 
-- **`apply-db` cannot auto-detect an open database on Windows** (no `lsof`);
-  make sure opencode is fully closed before running it.
+- Open-file detection uses the native Windows file-sharing API, so active
+  histories are skipped even without `lsof`. Close OpenCode manually before
+  `apply-db`; automatic app quit is currently macOS-only.
 - The JSONL truncation works exactly the same: the file is rewritten from the
   last compaction marker onward.
 - Antigravity paths under `%USERPROFILE%\.gemini` are the same on Windows.
@@ -177,6 +202,17 @@ PR checklist (so the maintainers can trust and verify it):
 Even if you don't write code: open an **issue** with the tool name, where its
 conversations live, and a sample of the storage format — that is already a
 great contribution.
+
+## Development checks
+
+The project remains stdlib-only. Run the regression suite with:
+
+```bash
+python3 -m unittest discover -v
+```
+
+It covers structured markers, atomic permission-preserving rewrites, subagent
+detection, manifests, totals, OpenCode transactions and CLI exit codes.
 
 ## License
 

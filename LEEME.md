@@ -31,29 +31,37 @@ en cuatro carpetas distintas.
 
 Esta herramienta detecta el **último marcador de compactación** de cada
 conversación y recorta todo lo anterior — conservando el resumen y lo reciente
-intactos. Después limpia lo demás que es seguro: snapshots huérfanos,
-tool-outputs, logs, caches, grabaciones del browser. **Siempre después de un
-respaldo completo.**
+intactos. Después limpia datos desechables: snapshots, tool-outputs, logs,
+caches, grabaciones del browser y transcripts de subagentes cerrados. Antes
+muestra estas categorías destructivas; el respaldo externo completo es opcional.
 
 ## Pensada para agentes de IA — y para humanos
 
-Dos formas de usarla:
+Tres formas de usarla:
 
 1. **Por un agente de IA (recomendado)** — el repo incluye una skill para
    agentes (`skills/conversation-reclaim/SKILL.md`). Instálala y dile a tu
    agente *"libera espacio de mis conversaciones"* (o en inglés; la herramienta
    habla el idioma en el que le hables). La skill conoce los marcadores, las
-   reglas de seguridad y el flujo respaldo-primero. Así la usa el autor.
-2. **Directo desde la terminal** — un CLI de Python de un solo archivo (solo
+   reglas de seguridad y el flujo revisión-primero. Así la usa el autor.
+2. **Interfaz visual** — ejecuta `python3 reclaim.py gui` en macOS/Linux o
+   `py reclaim.py gui` en Windows. El panel mide cada categoría, marca lo
+   recomendado, explica qué conserva, permite desmarcar lo que quieras, ofrece
+   respaldo externo y confirma antes de escribir. También puedes abrir
+   `launch-gui.command` en macOS o `launch-gui.bat` en Windows. Usa Python/Tk;
+   no necesita Flutter, Go, Node ni servidor web.
+3. **Directo desde la terminal** — un CLI de Python (solo
    stdlib), sin dependencias ni instalación. Corre `scan` primero, revisa los
    números, y luego `apply` con un destino de respaldo:
 
 ```bash
+python3 reclaim.py gui                    # revisión y limpieza visual
 python3 reclaim.py scan                    # estimación de solo lectura
 python3 reclaim.py apply                   # aplica; escribe manifiesto en ~/.conversation-reclaim/
 python3 reclaim.py apply --backup-dir /Volumes/DISCO/respaldos-ia   # respaldo completo opcional
 python3 reclaim.py apply --only antigravity   # solo una herramienta
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO   # poda opencode.db (opencode cerrado; respaldo obligatorio o --no-backup)
+python3 reclaim.py apply-db --no-backup --close-opencode  # avisa, cierra OpenCode normalmente y poda
 python3 reclaim.py skills                  # lista skills y detecta repetidas
 python3 reclaim.py restore --backup-dir /ruta
 ```
@@ -74,10 +82,10 @@ Pídele en español y responde en español; en inglés, en inglés.
 
 | Herramienta | Almacenamiento | Marcador de compactación | Qué hace `apply` |
 |---|---|---|---|
-| **Claude Code** | `~/.claude/projects/**/*.jsonl` | línea con `Conversation compacted` / `compactMetadata` | recorta todo lo anterior al último marcador |
-| **Codex** | `~/.codex/sessions/**/rollout-*.jsonl` | evento `"type":"compacted"` | igual |
+| **Claude Code** | `~/.claude/projects/**/*.jsonl` | evento estructurado de resumen/compactación | recorta antes del último marcador + elimina sidechains cerrados |
+| **Codex** | `~/.codex/sessions/**/rollout-*.jsonl` | evento superior `"type":"compacted"` | igual + elimina rollouts/índices de subagentes cerrados |
 | **OpenCode** | `~/.local/share/opencode/opencode.db` | part `type=compaction` con `tail_start_id` | `apply-db`: eventos de streaming redundantes + mensajes pre-compactación + VACUUM |
-| **OpenCode (archivos)** | `snapshot/`, `tool-output/`, `log/` | — | snapshots huérfanos, tool-outputs, logs |
+| **OpenCode (archivos)** | `snapshot/`, `tool-output/`, `log/` | — | todos los snapshots locales, tool-outputs y logs |
 | **Antigravity / Gemini** | `~/.gemini/antigravity{,,-cli,-ide}/conversations/*.db` | pasos `step_type 98` (CONVERSATION_HISTORY) | poda pasos pre-compactación + transcripts, scratch, logs, caches, `browser_recordings` |
 | **Command Code** | `~/.commandcode/projects/` | ninguno detectado | solo escaneo/respaldo |
 
@@ -101,10 +109,24 @@ esos eventos redundantes, luego poda los mensajes pre-compactación y hace
   manuales de respaldo).
 - `apply-db` exige un respaldo explícito (`--backup-dir`) o `--no-backup`.
 - Refusa tocar `opencode.db` mientras opencode esté corriendo.
+- `--close-opencode` avisa y solicita el cierre normal de la app en macOS. Se
+  niega si OpenCode es el anfitrión/ancestro del comando actual, para no matar
+  al agente que ejecuta la limpieza. Ejecutarlo desde Terminal, Codex u otro
+  harness externo.
 - Pre-flight: no borra eventos si el contenido solo vive en la tabla de
   eventos.
 - Verificación de integridad (`PRAGMA integrity_check`) tras operar en DBs.
 - Las DB de conversación de Antigravity se omiten si la app las tiene abiertas.
+- Los subagentes Codex cerrados se identifican mediante `session_meta`; los
+  activos se preservan si existe un writer lock o un spawn edge abierto.
+- Los sidechains de Claude, incluidos `agent-acompact-*`, se validan mediante
+  sus metadatos JSON y solo se eliminan cuando no están abiertos.
+- Antes de borrar transcripts de subagentes o `browser_recordings`, el CLI
+  muestra cantidad y tamaño. Las grabaciones son capturas ya consumidas que
+  Antigravity no reutiliza.
+- Se puede limpiar desde Codex: la tarea actual, rollouts bloqueados y DB de
+  logs activas se omiten; los historiales cerrados sí se limpian. Una ejecución
+  posterior puede recuperar la tarea actual una vez cerrada.
 - Las skills **solo se listan, nunca se borran** (las repetidas se pueden
   deduplicar con symlinks).
 - Los caches (tool-output, logs, snapshots, scratch) son seguros de borrar —
@@ -129,8 +151,9 @@ puedas verificar a mano:
 
 Notas para usuarios de Windows:
 
-- **`apply-db` no puede detectar una base abierta en Windows** (no hay `lsof`);
-  asegúrate de que opencode esté completamente cerrado antes de correrlo.
+- La detección usa la API nativa de archivos compartidos de Windows, así que
+  omite historiales activos sin depender de `lsof`. Cierra OpenCode manualmente
+  antes de `apply-db`; el cierre automático por ahora es solo para macOS.
 - El recorte de JSONL funciona exactamente igual: el archivo se reescribe desde
   el último marcador de compactación.
 - Las rutas de Antigravity bajo `%USERPROFILE%\.gemini` son las mismas en
@@ -185,6 +208,17 @@ Checklist para el PR (para que los mantenedores puedan confiar y verificar):
 Si no escribes código: abre un **issue** con el nombre de la herramienta,
 dónde viven sus conversaciones y una muestra del formato de almacenamiento —
 eso ya es una gran contribución.
+
+## Verificaciones de desarrollo
+
+El proyecto sigue usando solo la biblioteca estándar. Ejecuta las regresiones:
+
+```bash
+python3 -m unittest discover -v
+```
+
+Cubren marcadores estructurados, recortes atómicos con permisos, subagentes,
+manifiestos, totales, transacciones OpenCode y códigos de salida.
 
 ## Licencia
 
