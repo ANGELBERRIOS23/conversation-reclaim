@@ -2,13 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Check, ChevronDown, CircleHelp, ExternalLink,
-  FileClock, FolderCog, Globe2, HardDrive, Info, Languages,
+  FileClock, Globe2, HardDrive, Info, Languages,
   LoaderCircle, LockKeyhole, RefreshCw, ShieldCheck, Sparkles, Trash2,
 } from "lucide-react";
 import { BrandLogo } from "./BrandLogos";
 
 type Language = "es" | "en";
 type CategoryKey = string;
+type Page = "overview" | "activity" | "protection";
 
 type Category = {
   key: CategoryKey;
@@ -72,11 +73,24 @@ const copy = {
     close: "Listo",
     safetyTitle: "Tus conversaciones están protegidas",
     safetyBody: "La limpieza conserva las conversaciones activas y omite automáticamente cualquier archivo que esté en uso.",
-    native: "App nativa · Sin Python",
     advanced: "Limpieza avanzada",
     advancedBody: "La poda profunda de bases de datos permanece disponible en el CLI para usuarios técnicos.",
     errorTitle: "No se pudo completar",
     demo: "Vista previa — conecta el motor nativo al abrir la app de escritorio.",
+    activityTitle: "Actividad",
+    activityBody: "Consulta el análisis más reciente y los resultados de limpieza de esta sesión.",
+    latestScan: "Análisis más reciente",
+    found: "Espacio encontrado",
+    lastCleanup: "Última limpieza",
+    noCleanup: "Todavía no has realizado una limpieza en esta sesión.",
+    protectionTitle: "Protección",
+    protectionBody: "Estas reglas se aplican automáticamente antes de modificar cualquier archivo.",
+    activeRule: "Archivos en uso",
+    activeRuleBody: "Las conversaciones y bases de datos activas se omiten automáticamente.",
+    manifestRule: "Registro verificable",
+    manifestRuleBody: "Cada cambio queda documentado con su ruta, tamaño y resultado.",
+    atomicRule: "Cambios seguros",
+    atomicRuleBody: "Los recortes se preparan por separado y solo reemplazan el original al terminar correctamente.",
   },
   en: {
     product: "Conversation Reclaim",
@@ -110,11 +124,24 @@ const copy = {
     close: "Done",
     safetyTitle: "Your conversations stay protected",
     safetyBody: "Cleanup preserves active conversations and automatically skips anything currently in use.",
-    native: "Native app · No Python",
     advanced: "Advanced cleanup",
     advancedBody: "Deep database pruning remains available in the CLI for technical users.",
     errorTitle: "Could not complete",
     demo: "Preview mode — the native engine connects in the desktop app.",
+    activityTitle: "Activity",
+    activityBody: "Review the latest scan and cleanup results from this session.",
+    latestScan: "Latest scan",
+    found: "Space found",
+    lastCleanup: "Latest cleanup",
+    noCleanup: "No cleanup has been completed in this session yet.",
+    protectionTitle: "Protection",
+    protectionBody: "These safeguards run automatically before any file is changed.",
+    activeRule: "Files in use",
+    activeRuleBody: "Active conversations and databases are skipped automatically.",
+    manifestRule: "Verifiable record",
+    manifestRuleBody: "Every change records its path, size, and outcome.",
+    atomicRule: "Safe changes",
+    atomicRuleBody: "Trims are prepared separately and replace the original only after completing successfully.",
   },
 };
 
@@ -150,7 +177,10 @@ export default function App() {
   const [modal, setModal] = useState<"confirm" | "success" | "error" | null>(null);
   const [result, setResult] = useState<ApplyResult | null>(null);
   const [error, setError] = useState("");
+  const [page, setPage] = useState<Page>("overview");
+  const [languageOpen, setLanguageOpen] = useState(false);
   const t = copy[lang];
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 
   const runScan = async () => {
     setBusy("scan");
@@ -177,6 +207,7 @@ export default function App() {
     setLang(next);
     localStorage.setItem("reclaim-language", next);
     document.documentElement.lang = next;
+    setLanguageOpen(false);
   };
 
   const toggle = (key: CategoryKey) => {
@@ -204,57 +235,93 @@ export default function App() {
   };
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${isMac ? "mac" : ""}`}>
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark"><Sparkles size={18} /></span><span>{t.product}</span></div>
         <nav aria-label="Primary">
-          <button className="nav-item active"><HardDrive size={18} />{t.navOverview}</button>
-          <button className="nav-item" disabled><FileClock size={18} />{t.navActivity}</button>
-          <button className="nav-item" disabled><ShieldCheck size={18} />{t.navSafety}</button>
+          <button className={`nav-item ${page === "overview" ? "active" : ""}`} onClick={() => setPage("overview")}><HardDrive size={18} />{t.navOverview}</button>
+          <button className={`nav-item ${page === "activity" ? "active" : ""}`} onClick={() => setPage("activity")}><FileClock size={18} />{t.navActivity}</button>
+          <button className={`nav-item ${page === "protection" ? "active" : ""}`} onClick={() => setPage("protection")}><ShieldCheck size={18} />{t.navSafety}</button>
         </nav>
         <div className="sidebar-bottom">
-          <div className="language"><Languages size={16} /><select value={lang} onChange={(event) => changeLanguage(event.target.value as Language)} aria-label="Language"><option value="es">Español</option><option value="en">English</option></select><ChevronDown size={14} /></div>
-          <span className="native-pill"><Check size={13} />{t.native}</span>
+          <div className="language-picker">
+            <button className="language-trigger" onClick={() => setLanguageOpen((open) => !open)} aria-haspopup="listbox" aria-expanded={languageOpen}>
+              <Languages size={16} /><span>{lang === "es" ? "Español" : "English"}</span><ChevronDown className={languageOpen ? "open" : ""} size={14} />
+            </button>
+            {languageOpen && <div className="language-menu" role="listbox" aria-label="Language">
+              <button role="option" aria-selected={lang === "es"} onClick={() => changeLanguage("es")}>Español{lang === "es" && <Check size={14} />}</button>
+              <button role="option" aria-selected={lang === "en"} onClick={() => changeLanguage("en")}>English{lang === "en" && <Check size={14} />}</button>
+            </div>}
+          </div>
         </div>
       </aside>
 
       <main>
-        <header className="mobile-header"><div className="brand"><span className="brand-mark"><Sparkles size={17} /></span><span>{t.product}</span></div><button className="language compact" onClick={() => changeLanguage(lang === "es" ? "en" : "es")}><Globe2 size={17} />{lang.toUpperCase()}</button></header>
-        <div className="content">
-          <section className="hero">
-            <div className="hero-copy"><span className="eyebrow"><Sparkles size={14} />{t.eyebrow}</span><h1>{t.title}</h1><p>{t.subtitle}</p></div>
-            <div className="space-card">
-              <div className="orb" aria-hidden="true"><div className="orb-core"><Trash2 size={28} /></div></div>
-              <div><span>{t.ready}</span><strong>{scan ? formatBytes(scan.totalReclaimable) : "—"}</strong><small>{formatBytes(selectedBytes)} {t.selected}</small></div>
-            </div>
+        <header className="mobile-header">
+          <div className="brand"><span className="brand-mark"><Sparkles size={17} /></span><span>{t.product}</span></div>
+          <div className="mobile-actions">
+            <button className={`mobile-nav ${page === "overview" ? "active" : ""}`} onClick={() => setPage("overview")} aria-label={t.navOverview}><HardDrive size={17} /></button>
+            <button className={`mobile-nav ${page === "activity" ? "active" : ""}`} onClick={() => setPage("activity")} aria-label={t.navActivity}><FileClock size={17} /></button>
+            <button className={`mobile-nav ${page === "protection" ? "active" : ""}`} onClick={() => setPage("protection")} aria-label={t.navSafety}><ShieldCheck size={17} /></button>
+            <button className="language-compact" onClick={() => changeLanguage(lang === "es" ? "en" : "es")}><Globe2 size={17} />{lang.toUpperCase()}</button>
+          </div>
+        </header>
+
+        {page === "overview" && <>
+          <div className="content">
+            <section className="hero">
+              <div className="hero-copy"><span className="eyebrow"><Sparkles size={14} />{t.eyebrow}</span><h1>{t.title}</h1><p>{t.subtitle}</p></div>
+              <div className="space-card">
+                <div className="orb" aria-hidden="true"><div className="orb-core"><Trash2 size={28} /></div></div>
+                <div><span>{t.ready}</span><strong>{scan ? formatBytes(scan.totalReclaimable) : "—"}</strong><small>{formatBytes(selectedBytes)} {t.selected}</small></div>
+              </div>
+            </section>
+
+            {!isTauri() && <div className="demo-banner"><Info size={16} />{t.demo}</div>}
+
+            <section className="section-heading">
+              <div><h2>{t.choose}</h2><p>{t.chooseHelp}</p></div>
+              <button className="secondary-button scan-button" onClick={runScan} disabled={busy !== null}><RefreshCw size={16} className={busy === "scan" ? "spin" : ""} />{busy === "scan" ? t.scanning : t.scanNow}</button>
+            </section>
+
+            <section className="category-grid">
+              {(scan?.categories ?? []).map((category) => {
+                const description = lang === "es" ? category.descriptionEs : category.descriptionEn;
+                const checked = selected.has(category.key);
+                return <button key={category.key} className={`category-card ${checked ? "selected" : ""}`} onClick={() => category.available && toggle(category.key)} disabled={!category.available} aria-pressed={checked}>
+                  <div className="card-top"><span className={`tool-icon ${category.logo}`}><BrandLogo logo={category.logo} size={21} /></span><span className={`toggle ${checked ? "on" : ""}`}><span /></span></div>
+                  <div className="card-title"><h3>{category.name}</h3><span className={category.recommended ? "badge recommended" : "badge"}>{category.recommended ? t.recommended : t.optional}</span></div>
+                  <p>{description}</p>
+                  <div className="card-metric"><strong>{category.available ? formatBytes(category.bytes) : t.noData}</strong><span>{category.items} {t.items}</span></div>
+                  {category.protected && <div className="protected"><LockKeyhole size={13} />{t.protected}</div>}
+                </button>;
+              })}
+              {busy === "scan" && !scan && [0, 1, 2, 3].map((key) => <div className="category-card skeleton" key={key} />)}
+            </section>
+
+            <section className="safety-card"><div className="safety-icon"><ShieldCheck size={22} /></div><div><h3>{t.safetyTitle}</h3><p>{t.safetyBody}</p></div><details><summary>{t.advanced}<CircleHelp size={15} /></summary><p>{t.advancedBody}</p></details></section>
+          </div>
+
+          <footer className="action-bar"><div><span>{selected.size} {t.items}</span><strong>{formatBytes(selectedBytes)}</strong></div><button className="primary-button" disabled={!selected.size || busy !== null || !isTauri()} onClick={() => setModal("confirm")}><Sparkles size={17} />{busy === "clean" ? t.cleaning : t.clean}</button></footer>
+        </>}
+
+        {page === "activity" && <div className="content page-content">
+          <section className="page-intro"><span className="eyebrow"><FileClock size={14} />{t.navActivity}</span><h1>{t.activityTitle}</h1><p>{t.activityBody}</p></section>
+          <section className="status-grid">
+            <article className="status-card"><div className="status-icon"><HardDrive size={20} /></div><span>{t.latestScan}</span><strong>{scan ? new Date(scan.scannedAt).toLocaleString(lang) : "—"}</strong><small>{t.found}: {formatBytes(scan?.totalReclaimable ?? 0)}</small></article>
+            <article className="status-card"><div className="status-icon"><Check size={20} /></div><span>{t.lastCleanup}</span>{result ? <><strong>{formatBytes(result.freedBytes)}</strong><small>{result.applied} {t.items}</small></> : <p>{t.noCleanup}</p>}</article>
           </section>
+        </div>}
 
-          {!isTauri() && <div className="demo-banner"><Info size={16} />{t.demo}</div>}
-
-          <section className="section-heading">
-            <div><h2>{t.choose}</h2><p>{t.chooseHelp}</p></div>
-            <button className="secondary-button" onClick={runScan} disabled={busy !== null}><RefreshCw size={16} className={busy === "scan" ? "spin" : ""} />{busy === "scan" ? t.scanning : t.scanNow}</button>
+        {page === "protection" && <div className="content page-content">
+          <section className="page-intro"><span className="eyebrow"><ShieldCheck size={14} />{t.navSafety}</span><h1>{t.protectionTitle}</h1><p>{t.protectionBody}</p></section>
+          <section className="protection-grid">
+            <article className="protection-card"><span><LockKeyhole size={21} /></span><h2>{t.activeRule}</h2><p>{t.activeRuleBody}</p></article>
+            <article className="protection-card"><span><FileClock size={21} /></span><h2>{t.manifestRule}</h2><p>{t.manifestRuleBody}</p></article>
+            <article className="protection-card"><span><ShieldCheck size={21} /></span><h2>{t.atomicRule}</h2><p>{t.atomicRuleBody}</p></article>
           </section>
-
-          <section className="category-grid">
-            {(scan?.categories ?? []).map((category) => {
-              const description = lang === "es" ? category.descriptionEs : category.descriptionEn;
-              const checked = selected.has(category.key);
-              return <button key={category.key} className={`category-card ${checked ? "selected" : ""}`} onClick={() => category.available && toggle(category.key)} disabled={!category.available} aria-pressed={checked}>
-                <div className="card-top"><span className={`tool-icon ${category.logo}`}><BrandLogo logo={category.logo} size={21} /></span><span className={`toggle ${checked ? "on" : ""}`}><span /></span></div>
-                <div className="card-title"><h3>{category.name}</h3><span className={category.recommended ? "badge recommended" : "badge"}>{category.recommended ? t.recommended : t.optional}</span></div>
-                <p>{description}</p>
-                <div className="card-metric"><strong>{category.available ? formatBytes(category.bytes) : t.noData}</strong><span>{category.items} {t.items}</span></div>
-                {category.protected && <div className="protected"><LockKeyhole size={13} />{t.protected}</div>}
-              </button>;
-            })}
-            {busy === "scan" && !scan && [0, 1, 2, 3].map((key) => <div className="category-card skeleton" key={key} />)}
-          </section>
-
           <section className="safety-card"><div className="safety-icon"><ShieldCheck size={22} /></div><div><h3>{t.safetyTitle}</h3><p>{t.safetyBody}</p></div><details><summary>{t.advanced}<CircleHelp size={15} /></summary><p>{t.advancedBody}</p></details></section>
-        </div>
-
-        <footer className="action-bar"><div><span>{selected.size} {t.items}</span><strong>{formatBytes(selectedBytes)}</strong></div><button className="primary-button" disabled={!selected.size || busy !== null || !isTauri()} onClick={() => setModal("confirm")}><Sparkles size={17} />{busy === "clean" ? t.cleaning : t.clean}</button></footer>
+        </div>}
       </main>
 
       {modal && <div className="modal-backdrop" role="presentation" onMouseDown={() => busy === null && setModal(null)}><section className="modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>

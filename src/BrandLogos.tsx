@@ -1,4 +1,4 @@
-import type { ReactElement, SVGProps } from "react";
+import type { ReactElement } from "react";
 import { SiClaude, SiGooglegemini } from "@icons-pack/react-simple-icons";
 import { Boxes } from "lucide-react";
 
@@ -20,10 +20,8 @@ export function OpenCodeLogo({ size = 22, className }: LogoProps) {
 }
 
 export function CodexLogo({ size = 22, className }: LogoProps) {
-  const props: SVGProps<SVGSVGElement> = { width: size, height: size, viewBox: "0 0 24 24", className, role: "img", "aria-label": "Codex" };
-  return <svg {...props}>
-    <path fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" d="M12 3.25a4.25 4.25 0 0 1 4.1 3.14 4.25 4.25 0 0 1 2.67 6.76 4.25 4.25 0 0 1-4.08 5.89A4.25 4.25 0 0 1 8 18.1a4.25 4.25 0 0 1-2.7-6.74A4.25 4.25 0 0 1 9.4 5.47 4.2 4.2 0 0 1 12 3.25Z" />
-    <path fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" d="m9.4 5.47 6.7.92 2.67 6.76-4.08 5.89L8 18.1l-2.7-6.74L9.4 5.47Zm0 0 3.82 5.12m2.88-4.2-2.88 4.2m5.55 2.56-5.55-2.56m1.47 8.45-1.47-8.45M8 18.1l5.22-7.51M5.3 11.36l7.92-.77" />
+  return <svg role="img" aria-label="OpenAI Codex" width={size} height={size} viewBox="0 0 24 24" className={className}>
+    <path fill="currentColor" d="M22.282 9.821a6 6 0 0 0-.516-4.91 6.05 6.05 0 0 0-6.51-2.9A6.065 6.065 0 0 0 4.981 4.18a6 6 0 0 0-3.998 2.9 6.05 6.05 0 0 0 .743 7.097 5.98 5.98 0 0 0 .51 4.911 6.05 6.05 0 0 0 6.515 2.9A6 6 0 0 0 13.26 24a6.06 6.06 0 0 0 5.772-4.206 6 6 0 0 0 3.997-2.9 6.06 6.06 0 0 0-.747-7.073M13.26 22.43a4.48 4.48 0 0 1-2.876-1.04l.141-.081 4.779-2.758a.8.8 0 0 0 .392-.681v-6.737l2.02 1.168a.07.07 0 0 1 .038.052v5.583a4.504 4.504 0 0 1-4.494 4.494M3.6 18.304a4.47 4.47 0 0 1-.535-3.014l.142.085 4.783 2.759a.77.77 0 0 0 .78 0l5.843-3.369v2.332a.08.08 0 0 1-.033.062L9.74 19.95a4.5 4.5 0 0 1-6.14-1.646M2.34 7.896a4.5 4.5 0 0 1 2.366-1.973V11.6a.77.77 0 0 0 .388.677l5.815 3.354-2.02 1.168a.08.08 0 0 1-.071 0l-4.83-2.786A4.504 4.504 0 0 1 2.34 7.872zm16.597 3.855-5.833-3.387L15.119 7.2a.08.08 0 0 1 .071 0l4.83 2.791a4.494 4.494 0 0 1-.676 8.105v-5.678a.79.79 0 0 0-.407-.667m2.01-3.023-.141-.085-4.774-2.782a.78.78 0 0 0-.785 0L9.409 9.23V6.897a.07.07 0 0 1 .028-.061l4.83-2.787a4.5 4.5 0 0 1 6.68 4.66zM8.307 12.863l-2.02-1.164a.08.08 0 0 1-.038-.057V6.075a4.5 4.5 0 0 1 7.375-3.453l-.142.08-4.778 2.758a.8.8 0 0 0-.393.681zm1.098-2.365 2.602-1.5 2.607 1.5v2.999l-2.598 1.5-2.607-1.5Z" />
   </svg>;
 }
 
