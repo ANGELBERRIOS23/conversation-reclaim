@@ -15,7 +15,22 @@ permissions:
   contents: read
 
 jobs:
+  validate-release:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Test release tooling
+        run: npm run test:release
+      - name: Verify release version alignment
+        run: npm run check:release-version
+
   build:
+    needs: validate-release
     strategy:
       fail-fast: false
       matrix:
@@ -84,25 +99,34 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
+      - name: Generate release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$RELEASE_TAG" \
+            -f target_commitish="$GITHUB_SHA" \
+            --jq '.body' > release-notes.md
       - name: Generate signed updater index
         run: node scripts/generate-latest-json.mjs artifacts
         env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
           RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_NOTES_FILE: release-notes.md
       - name: Publish native desktop release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
         run: |
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            gh release create "$RELEASE_TAG" artifacts/* --generate-notes --verify-tag --title "Conversation Reclaim $RELEASE_TAG"
+            gh release create "$RELEASE_TAG" artifacts/* --notes-file release-notes.md --verify-tag --title "Conversation Reclaim $RELEASE_TAG"
           else
-            gh release create "$RELEASE_TAG" artifacts/* --generate-notes --target "$GITHUB_SHA" --title "Conversation Reclaim $RELEASE_TAG"
+            gh release create "$RELEASE_TAG" artifacts/* --notes-file release-notes.md --target "$GITHUB_SHA" --title "Conversation Reclaim $RELEASE_TAG"
           fi

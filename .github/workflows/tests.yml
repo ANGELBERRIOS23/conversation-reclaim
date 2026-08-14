@@ -24,6 +24,18 @@ jobs:
       - name: Test
         run: python -m unittest discover -v
 
+  release-tooling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Test release tooling
+        run: npm run test:release
+      - name: Check repository version alignment
+        run: npm run check:versions
+
   desktop:
     runs-on: macos-15
     steps:

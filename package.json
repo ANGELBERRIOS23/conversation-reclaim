@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "check:versions": "node scripts/check-release-version.mjs --current",
+    "check:release-version": "node scripts/check-release-version.mjs",
+    "test:release": "node --test scripts/*.test.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
