@@ -22,10 +22,7 @@
         "center": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "trafficLightPosition": {
-          "x": 18,
-          "y": 18
-        }
+        "trafficLightPosition": { "x": 18, "y": 18 }
       }
     ],
     "security": {
@@ -47,7 +44,6 @@
     "shortDescription": "Safely reclaim AI conversation storage",
     "longDescription": "A native desktop utility that finds and safely removes regenerable or compacted AI assistant data.",
     "copyright": "Copyright © 2026 Angel Berrios",
-    "publisher": "Angel Berrios",
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
