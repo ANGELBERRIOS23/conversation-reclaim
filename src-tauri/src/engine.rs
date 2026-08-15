@@ -44,6 +44,8 @@ pub struct ApplyRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ApplyResult {
     freed_bytes: u64,
+    planned_bytes: u64,
+    skipped_bytes: u64,
     manifest_path: String,
     applied: usize,
     skipped: usize,
@@ -283,45 +285,71 @@ pub(crate) fn add_tree_actions(
     }
 }
 
-fn build_plan() -> Result<(Vec<Action>, Vec<String>, Vec<PathBuf>), String> {
+fn build_plan_for(
+    chosen: Option<&HashSet<String>>,
+) -> Result<(Vec<Action>, Vec<String>, Vec<PathBuf>), String> {
     let user_home = home()?;
     let mut actions = Vec::new();
     let mut warnings = Vec::new();
-    let harnesses = registered_harnesses();
-    let allowed_roots = harnesses
-        .iter()
-        .flat_map(|h| h.allowed_roots(&user_home))
-        .collect();
-    for harness in harnesses {
+    let mut allowed_roots = Vec::new();
+
+    for harness in registered_harnesses() {
+        let key = harness.metadata().key;
+        if let Some(selected) = chosen {
+            if !selected.contains(key) {
+                continue;
+            }
+        }
+        allowed_roots.extend(harness.allowed_roots(&user_home));
         harness.plan(&user_home, &mut actions, &mut warnings);
     }
+
     Ok((actions, warnings, allowed_roots))
 }
 
 pub fn scan_storage() -> Result<ScanResult, String> {
-    let (actions, warnings, _) = build_plan()?;
+    let (actions, mut warnings, _) = build_plan_for(None)?;
+    let user_home = home()?;
     let mut categories = Vec::new();
+
     for harness in registered_harnesses() {
         let metadata = harness.metadata();
-        let matching: Vec<_> = actions
-            .iter()
-            .filter(|a| a.category == metadata.key)
-            .collect();
+        let mut bytes = 0u64;
+        let mut items = 0u64;
+        let mut active_trim_files = 0u64;
+
+        for action in actions.iter().filter(|action| action.category == metadata.key) {
+            if action.action == "truncate" && file_is_active(&action.path) {
+                active_trim_files += 1;
+                continue;
+            }
+            bytes += action.planned_bytes;
+            items += 1;
+        }
+
+        if active_trim_files > 0 {
+            warnings.push(format!(
+                "{}: {} active or unverifiable history file(s) were excluded from the reclaimable estimate",
+                metadata.name, active_trim_files
+            ));
+        }
+
         categories.push(Category {
             key: metadata.key.into(),
             name: metadata.name.into(),
             description_es: metadata.description_es.into(),
             description_en: metadata.description_en.into(),
             logo: metadata.logo.into(),
-            bytes: matching.iter().map(|a| a.planned_bytes).sum(),
-            items: matching.len() as u64,
+            bytes,
+            items,
             recommended: metadata.recommended,
             protected: metadata.protected,
-            available: true,
+            available: harness.is_available(&user_home),
             details: Vec::new(),
         });
     }
-    let total_reclaimable = categories.iter().map(|c| c.bytes).sum();
+
+    let total_reclaimable = categories.iter().map(|category| category.bytes).sum();
     Ok(ScanResult {
         categories,
         total_reclaimable,
@@ -368,18 +396,17 @@ pub fn apply_cleanup(request: ApplyRequest) -> Result<ApplyResult, String> {
     if chosen.is_empty() {
         return Err("No cleanup categories were selected".into());
     }
+
     let registered: HashSet<_> = registered_harnesses()
         .into_iter()
-        .map(|h| h.metadata().key.to_string())
+        .map(|harness| harness.metadata().key.to_string())
         .collect();
     if let Some(unknown) = chosen.iter().find(|key| !registered.contains(*key)) {
         return Err(format!("Unknown cleanup category: {unknown}"));
     }
-    let (plan, mut warnings, allowed) = build_plan()?;
-    let selected: Vec<_> = plan
-        .into_iter()
-        .filter(|a| chosen.contains(&a.category))
-        .collect();
+
+    let (selected, mut warnings, allowed) = build_plan_for(Some(&chosen))?;
+    let planned_bytes = selected.iter().map(|action| action.planned_bytes).sum();
     let user_home = home()?;
     let manifest_dir = user_home.join(".conversation-reclaim");
     fs::create_dir_all(&manifest_dir).map_err(|e| e.to_string())?;
@@ -392,12 +419,19 @@ pub fn apply_cleanup(request: ApplyRequest) -> Result<ApplyResult, String> {
         .write(true)
         .open(&manifest_path)
         .map_err(|e| e.to_string())?;
-    writeln!(manifest, "{}", json!({"type":"plan","version":"3.0.1","createdAt":Local::now().to_rfc3339(),"actions":selected})).map_err(|e| e.to_string())?;
+    writeln!(
+        manifest,
+        "{}",
+        json!({"type":"plan","version":"3.0.1","createdAt":Local::now().to_rfc3339(),"actions":selected})
+    )
+    .map_err(|e| e.to_string())?;
     manifest.sync_all().map_err(|e| e.to_string())?;
 
     let mut freed = 0u64;
+    let mut skipped_bytes = 0u64;
     let mut applied = 0usize;
     let mut skipped = 0usize;
+
     for action in selected {
         let before = file_size(&action.path);
         let outcome = if !path_is_under(&action.path, &allowed) {
@@ -416,28 +450,38 @@ pub fn apply_cleanup(request: ApplyRequest) -> Result<ApplyResult, String> {
                 .map(|_| before)
                 .map_err(|e| e.to_string())
         };
+
         match outcome {
             Ok(bytes) => {
                 freed += bytes;
                 applied += 1;
-                writeln!(manifest, "{}", json!({"type":"outcome","status":"applied","path":action.path,"freedBytes":bytes})).map_err(|e| e.to_string())?;
+                writeln!(
+                    manifest,
+                    "{}",
+                    json!({"type":"outcome","status":"applied","path":action.path,"freedBytes":bytes})
+                )
+                .map_err(|e| e.to_string())?;
             }
             Err(error) => {
                 skipped += 1;
+                skipped_bytes += action.planned_bytes;
                 warnings.push(format!("{}: {}", action.path.display(), error));
                 writeln!(
                     manifest,
                     "{}",
-                    json!({"type":"outcome","status":"skipped","path":action.path,"error":error})
+                    json!({"type":"outcome","status":"skipped","path":action.path,"plannedBytes":action.planned_bytes,"error":error})
                 )
                 .map_err(|e| e.to_string())?;
             }
         }
         manifest.flush().map_err(|e| e.to_string())?;
     }
+
     manifest.sync_all().map_err(|e| e.to_string())?;
     Ok(ApplyResult {
         freed_bytes: freed,
+        planned_bytes,
+        skipped_bytes,
         manifest_path: manifest_path.display().to_string(),
         applied,
         skipped,
