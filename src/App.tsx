@@ -34,6 +34,8 @@ type ScanResult = {
 
 type ApplyResult = {
   freedBytes: number;
+  plannedBytes: number;
+  skippedBytes: number;
   manifestPath: string;
   applied: number;
   skipped: number;
@@ -67,14 +69,25 @@ const copy = {
     protected: "Datos activos protegidos",
     items: "elementos",
     noData: "No se encontraron datos",
+    notDetected: "No detectado",
     review: "Revisar selección",
     clean: "Liberar espacio",
     cleaning: "Liberando…",
     cancel: "Cancelar",
     confirmTitle: "¿Liberar el espacio seleccionado?",
     confirmBody: "Conversation Reclaim registrará cada cambio en un manifiesto. No cerrará aplicaciones ni tocará conversaciones activas.",
-    confirmed: "Espacio liberado",
-    resultBody: "La limpieza terminó correctamente.",
+    completeTitle: "Limpieza completada",
+    partialTitle: "Limpieza parcial",
+    noChangesTitle: "Sin cambios aplicados",
+    completeBody: "Se completaron todas las acciones seleccionadas.",
+    partialBody: "Parte de la limpieza se completó, pero algunos archivos se omitieron para mantener tus datos seguros.",
+    noChangesBody: "No se modificó ningún archivo. Revisa los detalles para saber por qué se omitieron las acciones.",
+    estimate: "Estimado",
+    actual: "Liberado realmente",
+    appliedActions: "acciones aplicadas",
+    skippedActions: "acciones omitidas",
+    scanNotes: "Notas del análisis",
+    details: "Ver detalles",
     manifest: "Mostrar manifiesto",
     close: "Listo",
     safetyTitle: "Tus conversaciones están protegidas",
@@ -127,14 +140,25 @@ const copy = {
     protected: "Active data protected",
     items: "items",
     noData: "No data found",
+    notDetected: "Not detected",
     review: "Review selection",
     clean: "Reclaim space",
     cleaning: "Reclaiming…",
     cancel: "Cancel",
     confirmTitle: "Reclaim the selected space?",
     confirmBody: "Conversation Reclaim records every change in a manifest. It will not close apps or touch active conversations.",
-    confirmed: "Space reclaimed",
-    resultBody: "Cleanup completed successfully.",
+    completeTitle: "Cleanup completed",
+    partialTitle: "Partial cleanup",
+    noChangesTitle: "No changes applied",
+    completeBody: "All selected cleanup actions were completed.",
+    partialBody: "Part of the cleanup completed, but some files were skipped to keep your data safe.",
+    noChangesBody: "No files were changed. Review the details to see why actions were skipped.",
+    estimate: "Estimated",
+    actual: "Actually reclaimed",
+    appliedActions: "actions applied",
+    skippedActions: "actions skipped",
+    scanNotes: "Scan notes",
+    details: "View details",
     manifest: "Show manifest",
     close: "Done",
     safetyTitle: "Your conversations stay protected",
@@ -216,7 +240,7 @@ export default function App() {
     try {
       const data = isTauri() ? await invoke<ScanResult>("scan_storage") : demoScan;
       setScan(data);
-      setSelected(new Set(data.categories.filter((item) => item.recommended && item.bytes > 0).map((item) => item.key)));
+      setSelected(new Set(data.categories.filter((item) => item.available && item.recommended && item.bytes > 0).map((item) => item.key)));
     } catch (cause) {
       setError(String(cause));
       setModal("error");
@@ -259,9 +283,22 @@ export default function App() {
     if (isTauri()) window.setTimeout(() => void checkUpdates(false), 1200);
   }, []);
 
-  const selectedBytes = useMemo(() => scan?.categories
-    .filter((item) => selected.has(item.key))
-    .reduce((sum, item) => sum + item.bytes, 0) ?? 0, [scan, selected]);
+  const selectedCategories = useMemo(() => scan?.categories
+    .filter((item) => selected.has(item.key)) ?? [], [scan, selected]);
+
+  const selectedBytes = useMemo(() => selectedCategories
+    .reduce((sum, item) => sum + item.bytes, 0), [selectedCategories]);
+
+  const resultKind = result
+    ? result.applied === 0
+      ? "none"
+      : result.skipped > 0
+        ? "partial"
+        : "complete"
+    : "complete";
+
+  const resultTitle = resultKind === "none" ? t.noChangesTitle : resultKind === "partial" ? t.partialTitle : t.completeTitle;
+  const resultBody = resultKind === "none" ? t.noChangesBody : resultKind === "partial" ? t.partialBody : t.completeBody;
 
   const changeLanguage = (next: Language) => {
     setLang(next);
@@ -350,16 +387,23 @@ export default function App() {
                 const description = lang === "es" ? category.descriptionEs : category.descriptionEn;
                 const categoryName = category.key === "media" ? t.temporaryMedia : category.name;
                 const checked = selected.has(category.key);
-                return <button key={category.key} className={`category-card ${checked ? "selected" : ""}`} onClick={() => category.available && toggle(category.key)} disabled={!category.available} aria-pressed={checked}>
+                const selectable = category.available && category.bytes > 0;
+                return <button key={category.key} className={`category-card ${checked ? "selected" : ""}`} onClick={() => selectable && toggle(category.key)} disabled={!selectable} aria-pressed={checked}>
                   <div className="card-top"><span className={`tool-icon ${category.logo}`}><BrandLogo logo={category.logo} size={21} /></span><span className={`toggle ${checked ? "on" : ""}`}><span /></span></div>
                   <div className="card-title"><h3>{categoryName}</h3><span className={category.recommended ? "badge recommended" : "badge"}>{category.recommended ? t.recommended : t.optional}</span></div>
                   <p>{description}</p>
-                  <div className="card-metric"><strong>{category.available ? formatBytes(category.bytes) : t.noData}</strong><span>{category.items} {t.items}</span></div>
+                  <div className="card-metric"><strong>{category.available ? formatBytes(category.bytes) : t.notDetected}</strong><span>{category.available ? `${category.items} ${t.items}` : ""}</span></div>
                   {category.protected && <div className="protected"><LockKeyhole size={13} />{t.protected}</div>}
                 </button>;
               })}
               {busy === "scan" && !scan && [0, 1, 2, 3].map((key) => <div className="category-card skeleton" key={key} />)}
             </section>
+
+            {scan?.warnings.length ? <section className="safety-card">
+              <div className="safety-icon"><Info size={22} /></div>
+              <div><h3>{t.scanNotes}</h3><p>{scan.warnings[0]}</p></div>
+              {scan.warnings.length > 1 && <details><summary>{t.details}<CircleHelp size={15} /></summary>{scan.warnings.slice(1).map((warning, index) => <p key={`${index}-${warning}`}>{warning}</p>)}</details>}
+            </section> : null}
 
             <section className="safety-card"><div className="safety-icon"><ShieldCheck size={22} /></div><div><h3>{t.safetyTitle}</h3><p>{t.safetyBody}</p></div><details><summary>{t.advanced}<CircleHelp size={15} /></summary><p>{t.advancedBody}</p></details></section>
           </div>
@@ -371,7 +415,7 @@ export default function App() {
           <section className="page-intro"><span className="eyebrow"><FileClock size={14} />{t.navActivity}</span><h1>{t.activityTitle}</h1><p>{t.activityBody}</p></section>
           <section className="status-grid">
             <article className="status-card"><div className="status-icon"><HardDrive size={20} /></div><span>{t.latestScan}</span><strong>{scan ? new Date(scan.scannedAt).toLocaleString(lang) : "—"}</strong><small>{t.found}: {formatBytes(scan?.totalReclaimable ?? 0)}</small></article>
-            <article className="status-card"><div className="status-icon"><Check size={20} /></div><span>{t.lastCleanup}</span>{result ? <><strong>{formatBytes(result.freedBytes)}</strong><small>{result.applied} {t.items}</small></> : <p>{t.noCleanup}</p>}</article>
+            <article className="status-card"><div className="status-icon"><Check size={20} /></div><span>{t.lastCleanup}</span>{result ? <><strong>{formatBytes(result.freedBytes)}</strong><small>{result.applied} {t.appliedActions} · {result.skipped} {t.skippedActions}</small></> : <p>{t.noCleanup}</p>}</article>
           </section>
         </div>}
 
@@ -391,10 +435,19 @@ export default function App() {
       </main>
 
       {modal && <div className="modal-backdrop" role="presentation" onMouseDown={() => busy === null && setModal(null)}><section className="modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
-        <span className={`modal-icon ${modal}`}>{modal === "success" ? <Check size={28} /> : modal === "error" ? <Info size={28} /> : <Trash2 size={27} />}</span>
-        <h2>{modal === "confirm" ? t.confirmTitle : modal === "success" ? t.confirmed : t.errorTitle}</h2>
-        <p>{modal === "confirm" ? t.confirmBody : modal === "success" ? `${t.resultBody} ${formatBytes(result?.freedBytes ?? 0)}` : error}</p>
-        {modal === "confirm" && <div className="confirm-total"><span>{t.ready}</span><strong>{formatBytes(selectedBytes)}</strong></div>}
+        <span className={`modal-icon ${modal}`}>{modal === "success" ? resultKind === "complete" ? <Check size={28} /> : <Info size={28} /> : modal === "error" ? <Info size={28} /> : <Trash2 size={27} />}</span>
+        <h2>{modal === "confirm" ? t.confirmTitle : modal === "success" ? resultTitle : t.errorTitle}</h2>
+        <p>{modal === "confirm" ? t.confirmBody : modal === "success" ? resultBody : error}</p>
+        {modal === "confirm" && <>
+          <div className="confirm-total"><span>{t.estimate}</span><strong>{formatBytes(selectedBytes)}</strong></div>
+          {selectedCategories.length > 0 && <details><summary>{t.review}<CircleHelp size={15} /></summary>{selectedCategories.map((category) => <p key={category.key}>{category.key === "media" ? t.temporaryMedia : category.name}: {formatBytes(category.bytes)} · {category.items} {t.items}</p>)}</details>}
+        </>}
+        {modal === "success" && result && <>
+          <div className="confirm-total"><span>{t.estimate}</span><strong>{formatBytes(result.plannedBytes)}</strong></div>
+          <div className="confirm-total"><span>{t.actual}</span><strong>{formatBytes(result.freedBytes)}</strong></div>
+          <p>{result.applied} {t.appliedActions} · {result.skipped} {t.skippedActions}</p>
+          {result.warnings.length > 0 && <details><summary>{t.details}<CircleHelp size={15} /></summary>{result.warnings.map((warning, index) => <p key={`${index}-${warning}`}>{warning}</p>)}</details>}
+        </>}
         <div className="modal-actions">
           {modal === "confirm" ? <><button className="secondary-button" onClick={() => setModal(null)}>{t.cancel}</button><button className="primary-button" onClick={clean}>{t.clean}</button></> : <>
             {modal === "success" && result?.manifestPath && <button className="secondary-button" onClick={() => invoke("reveal_manifest", { path: result.manifestPath })}><ExternalLink size={15} />{t.manifest}</button>}
