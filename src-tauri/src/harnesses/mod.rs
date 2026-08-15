@@ -29,6 +29,10 @@ pub trait Harness: Send + Sync {
     fn metadata(&self) -> HarnessMetadata;
     fn allowed_roots(&self, home: &Path) -> Vec<std::path::PathBuf>;
     fn plan(&self, home: &Path, actions: &mut Vec<Action>, warnings: &mut Vec<String>);
+
+    fn is_available(&self, home: &Path) -> bool {
+        self.allowed_roots(home).iter().any(|root| root.exists())
+    }
 }
 
 pub fn registered_harnesses() -> Vec<Box<dyn Harness>> {
