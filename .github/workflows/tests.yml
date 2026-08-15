@@ -60,6 +60,8 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
+      - name: Test Windows native engine
+        run: cargo test --manifest-path src-tauri/Cargo.toml
       - name: Build Windows NSIS installer
         run: npm run tauri build -- --bundles nsis --config src-tauri/tauri.windows-ci.conf.json
       - name: Verify NSIS installer output
