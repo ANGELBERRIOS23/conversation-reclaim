@@ -206,6 +206,7 @@ const demoScan: ScanResult = {
     { key: "cursor", name: "Cursor", descriptionEs: "Beta: cachés regenerables del editor Cursor; tus chats no se tocan", descriptionEn: "Beta: regenerable Cursor editor caches; your chats are not touched", logo: "cursor", bytes: 612_368_384, items: 27, recommended: false, protected: true, available: true, details: [] },
     { key: "copilot", name: "GitHub Copilot (VS Code)", descriptionEs: "Beta: cachés regenerables de VS Code, donde vive Copilot Chat; tus chats no se tocan", descriptionEn: "Beta: regenerable VS Code caches where Copilot Chat lives; your chats are not touched", logo: "copilot", bytes: 415_236_096, items: 19, recommended: false, protected: true, available: true, details: [] },
     { key: "trae", name: "Trae", descriptionEs: "Beta: cachés regenerables de Trae; sesiones, credenciales y certificados no se tocan", descriptionEn: "Beta: regenerable Trae caches; sessions, credentials, and certificates are not touched", logo: "trae", bytes: 0, items: 0, recommended: false, protected: true, available: false, details: [] },
+    { key: "zcode", name: "ZCode", descriptionEs: "Beta: cachés, registros y grabaciones de shell regenerables de ZCode; conversaciones, credenciales y certificados no se tocan", descriptionEn: "Beta: regenerable ZCode caches, logs, and shell recordings; conversations, credentials, and certificates are not touched", logo: "zcode", bytes: 0, items: 0, recommended: false, protected: true, available: false, details: [] },
   ],
 };
 
@@ -358,6 +359,7 @@ export default function App() {
       </aside>
 
       <main>
+        <div className="titlebar-drag" data-tauri-drag-region aria-hidden="true" />
         <header className="mobile-header">
           <div className="brand" data-tauri-drag-region><span className="brand-mark"><Sparkles size={17} /></span><span>{t.product}</span></div>
           <div className="mobile-actions">

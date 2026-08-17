@@ -6,6 +6,7 @@ mod cursor;
 mod media;
 mod opencode;
 mod trae;
+mod zcode;
 
 use crate::engine::Action;
 use serde::Serialize;
@@ -48,6 +49,7 @@ pub fn registered_harnesses() -> Vec<Box<dyn Harness>> {
         Box::new(cursor::Cursor),
         Box::new(copilot::Copilot),
         Box::new(trae::Trae),
+        Box::new(zcode::ZCode),
     ]
 }
 
