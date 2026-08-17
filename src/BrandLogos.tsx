@@ -1,5 +1,5 @@
 import type { ReactElement } from "react";
-import { SiClaude, SiCursor, SiGithubcopilot, SiGooglegemini } from "@icons-pack/react-simple-icons";
+import { SiClaude, SiCursor, SiGithubcopilot, SiGooglegemini, SiWindsurf } from "@icons-pack/react-simple-icons";
 import { Boxes, Image as ImageIcon } from "lucide-react";
 
 type LogoProps = { size?: number; className?: string };
@@ -24,6 +24,31 @@ export function CopilotLogo({ size = 22, className }: LogoProps) {
   return <SiGithubcopilot title="GitHub Copilot" size={size} className={className} />;
 }
 
+export function ZCodeLogo({ size = 22, className }: LogoProps) {
+  return <svg role="img" aria-label="ZCode" width={size} height={size} viewBox="0 0 24 24" className={className}>
+    <rect x="1.5" y="1.5" width="21" height="21" rx="6" fill="none" stroke="currentColor" strokeWidth="1.6" />
+    <path fill="currentColor" d="M7 8h10v1.9l-7 8.1h7V20H7v-1.9l7-8.1H7z" />
+  </svg>;
+}
+
+export function TraeLogo({ size = 22, className }: LogoProps) {
+  return <svg role="img" aria-label="Trae" width={size} height={size} viewBox="0 0 24 24" className={className}>
+    <rect x="1.5" y="1.5" width="21" height="21" rx="6" fill="none" stroke="currentColor" strokeWidth="1.6" />
+    <path fill="currentColor" d="M6.5 7h11v2h-4.5v11h-2V9H6.5z" />
+  </svg>;
+}
+
+export function KiroLogo({ size = 22, className }: LogoProps) {
+  return <svg role="img" aria-label="Kiro" width={size} height={size} viewBox="0 0 24 24" className={className}>
+    <rect x="1.5" y="1.5" width="21" height="21" rx="6" fill="none" stroke="currentColor" strokeWidth="1.6" />
+    <path fill="currentColor" d="M7 6.5h2V12l5.2-5.5h2.6L11.7 12l5.4 5.5h-2.7L9 12.2v5.3H7z" />
+  </svg>;
+}
+
+export function WindsurfLogo({ size = 22, className }: LogoProps) {
+  return <SiWindsurf title="Windsurf" size={size} className={className} />;
+}
+
 export function OpenCodeLogo({ size = 22, className }: LogoProps) {
   return <svg role="img" aria-label="OpenCode" width={size} height={size} viewBox="0 0 24 24" className={className}>
     <path fill="currentColor" fillRule="evenodd" d="M18 19.5H6v-15h12v15Zm-3-12H9v9h6v-9Z" />
@@ -45,6 +70,10 @@ const logos: Record<string, (props: LogoProps) => ReactElement> = {
   media: MediaLogo,
   cursor: CursorLogo,
   copilot: CopilotLogo,
+  zcode: ZCodeLogo,
+  trae: TraeLogo,
+  kiro: KiroLogo,
+  windsurf: WindsurfLogo,
 };
 
 export function BrandLogo({ logo, ...props }: LogoProps & { logo: string }) {

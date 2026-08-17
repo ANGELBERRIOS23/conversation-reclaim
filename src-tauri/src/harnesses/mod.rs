@@ -3,9 +3,11 @@ mod claude;
 mod codex;
 mod copilot;
 mod cursor;
+mod kiro;
 mod media;
 mod opencode;
 mod trae;
+mod windsurf;
 mod zcode;
 
 use crate::engine::Action;
@@ -50,6 +52,8 @@ pub fn registered_harnesses() -> Vec<Box<dyn Harness>> {
         Box::new(copilot::Copilot),
         Box::new(trae::Trae),
         Box::new(zcode::ZCode),
+        Box::new(kiro::Kiro),
+        Box::new(windsurf::Windsurf),
     ]
 }
 
