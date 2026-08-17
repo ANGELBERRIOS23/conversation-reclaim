@@ -203,6 +203,9 @@ const demoScan: ScanResult = {
     { key: "opencode", name: "OpenCode", descriptionEs: "Archivos temporales, registros y snapshots", descriptionEn: "Temporary files, logs, and snapshots", logo: "opencode", bytes: 2_351_480_832, items: 418, recommended: false, protected: true, available: true, details: [] },
     { key: "antigravity", name: "Antigravity", descriptionEs: "Grabaciones del navegador y datos temporales", descriptionEn: "Browser recordings and temporary data", logo: "gemini", bytes: 884_695_040, items: 182, recommended: true, protected: true, available: true, details: [] },
     { key: "media", name: "Temporary media", descriptionEs: "Adjuntos temporales antiguos; las vistas previas pueden desaparecer", descriptionEn: "Old temporary attachments; previews may disappear", logo: "media", bytes: 487_587_840, items: 3603, recommended: false, protected: true, available: true, details: [] },
+    { key: "cursor", name: "Cursor", descriptionEs: "Beta: cachés regenerables del editor Cursor; tus chats no se tocan", descriptionEn: "Beta: regenerable Cursor editor caches; your chats are not touched", logo: "cursor", bytes: 612_368_384, items: 27, recommended: false, protected: true, available: true, details: [] },
+    { key: "copilot", name: "GitHub Copilot (VS Code)", descriptionEs: "Beta: cachés regenerables de VS Code, donde vive Copilot Chat; tus chats no se tocan", descriptionEn: "Beta: regenerable VS Code caches where Copilot Chat lives; your chats are not touched", logo: "copilot", bytes: 415_236_096, items: 19, recommended: false, protected: true, available: true, details: [] },
+    { key: "trae", name: "Trae", descriptionEs: "Beta: cachés regenerables de Trae; sesiones, credenciales y certificados no se tocan", descriptionEn: "Beta: regenerable Trae caches; sessions, credentials, and certificates are not touched", logo: "trae", bytes: 0, items: 0, recommended: false, protected: true, available: false, details: [] },
   ],
 };
 
@@ -334,7 +337,7 @@ export default function App() {
   return (
     <div className={`app-shell ${isMac ? "mac" : ""}`}>
       <aside className="sidebar">
-        <div className="brand"><span className="brand-mark"><Sparkles size={18} /></span><span>{t.product}</span></div>
+        <div className="brand" data-tauri-drag-region><span className="brand-mark"><Sparkles size={18} /></span><span>{t.product}</span></div>
         <nav aria-label="Primary">
           <button className={`nav-item ${page === "overview" ? "active" : ""}`} onClick={() => setPage("overview")}><HardDrive size={18} />{t.navOverview}</button>
           <button className={`nav-item ${page === "activity" ? "active" : ""}`} onClick={() => setPage("activity")}><FileClock size={18} />{t.navActivity}</button>
@@ -356,7 +359,7 @@ export default function App() {
 
       <main>
         <header className="mobile-header">
-          <div className="brand"><span className="brand-mark"><Sparkles size={17} /></span><span>{t.product}</span></div>
+          <div className="brand" data-tauri-drag-region><span className="brand-mark"><Sparkles size={17} /></span><span>{t.product}</span></div>
           <div className="mobile-actions">
             <button className={`mobile-nav ${page === "overview" ? "active" : ""}`} onClick={() => setPage("overview")} aria-label={t.navOverview}><HardDrive size={17} /></button>
             <button className={`mobile-nav ${page === "activity" ? "active" : ""}`} onClick={() => setPage("activity")} aria-label={t.navActivity}><FileClock size={17} /></button>

@@ -19,6 +19,7 @@ button:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px
 .app-shell { min-height: 100vh; background: radial-gradient(circle at 74% 6%, rgba(129,199,255,.24), transparent 26rem), radial-gradient(circle at 35% 42%, rgba(202,229,255,.23), transparent 24rem), #f1f4f7; display: grid; grid-template-columns: 230px minmax(0, 1fr); }
 .sidebar { position: sticky; top: 0; height: 100vh; padding: 58px 18px 24px; border-right: 1px solid var(--border); background: rgba(247,249,251,.72); backdrop-filter: blur(28px) saturate(140%); display: flex; flex-direction: column; z-index: 5; }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 720; letter-spacing: -.02em; font-size: 15px; white-space: nowrap; }
+[data-tauri-drag-region] { -webkit-user-select: none; user-select: none; cursor: default; }
 .brand-mark { width: 31px; height: 31px; display: grid; place-items: center; border-radius: 10px; color: white; background: linear-gradient(145deg, #43b8ff, #0969eb 68%, #1953bd); box-shadow: 0 8px 20px rgba(16,105,226,.27), inset 0 1px 1px rgba(255,255,255,.45); }
 nav { display: grid; gap: 5px; margin-top: 35px; }
 .nav-item { appearance: none; border: 0; background: transparent; padding: 10px 12px; border-radius: 10px; display: flex; align-items: center; gap: 11px; color: #74808c; text-align: left; font-size: 13.5px; cursor: pointer; transition: color .16s, background .16s; }

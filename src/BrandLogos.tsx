@@ -1,5 +1,5 @@
 import type { ReactElement } from "react";
-import { SiClaude, SiGooglegemini } from "@icons-pack/react-simple-icons";
+import { SiClaude, SiCursor, SiGithubcopilot, SiGooglegemini } from "@icons-pack/react-simple-icons";
 import { Boxes, Image as ImageIcon } from "lucide-react";
 
 type LogoProps = { size?: number; className?: string };
@@ -14,6 +14,14 @@ export function GeminiLogo({ size = 22, className }: LogoProps) {
 
 export function MediaLogo({ size = 22, className }: LogoProps) {
   return <ImageIcon aria-label="Temporary media" size={size} className={className} />;
+}
+
+export function CursorLogo({ size = 22, className }: LogoProps) {
+  return <SiCursor title="Cursor" size={size} className={className} />;
+}
+
+export function CopilotLogo({ size = 22, className }: LogoProps) {
+  return <SiGithubcopilot title="GitHub Copilot" size={size} className={className} />;
 }
 
 export function OpenCodeLogo({ size = 22, className }: LogoProps) {
@@ -35,6 +43,8 @@ const logos: Record<string, (props: LogoProps) => ReactElement> = {
   opencode: OpenCodeLogo,
   gemini: GeminiLogo,
   media: MediaLogo,
+  cursor: CursorLogo,
+  copilot: CopilotLogo,
 };
 
 export function BrandLogo({ logo, ...props }: LogoProps & { logo: string }) {

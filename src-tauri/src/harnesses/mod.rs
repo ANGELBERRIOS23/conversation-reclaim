@@ -1,8 +1,11 @@
 mod antigravity;
 mod claude;
 mod codex;
+mod copilot;
+mod cursor;
 mod media;
 mod opencode;
+mod trae;
 
 use crate::engine::Action;
 use serde::Serialize;
@@ -42,6 +45,9 @@ pub fn registered_harnesses() -> Vec<Box<dyn Harness>> {
         Box::new(media::TemporaryMedia),
         Box::new(opencode::OpenCode),
         Box::new(antigravity::Antigravity),
+        Box::new(cursor::Cursor),
+        Box::new(copilot::Copilot),
+        Box::new(trae::Trae),
     ]
 }
 
