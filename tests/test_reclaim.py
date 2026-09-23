@@ -19,17 +19,17 @@ def write_jsonl(path, records):
 
 
 class MarkerTests(unittest.TestCase):
-    def test_nested_codex_marker_is_not_accepted(self):
+    def test_nested_claude_marker_is_not_accepted(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "rollout.jsonl"
             write_jsonl(path, [
                 {"type": "event", "payload": "keep"},
-                {"type": "unrelated", "payload": {"type": "compacted"}},
+                {"type": "unrelated", "payload": {"type": "summary"}},
                 {"type": "event", "payload": "recent"},
             ])
             before = path.read_bytes()
             result = reclaim.truncate_file_at_marker(
-                path, reclaim.is_codex_compaction, "codex")
+                path, reclaim.is_claude_compaction, "claude")
             self.assertFalse(result[2])
             self.assertEqual(path.read_bytes(), before)
 
@@ -38,25 +38,25 @@ class MarkerTests(unittest.TestCase):
             path = Path(td) / "rollout.jsonl"
             write_jsonl(path, [
                 {"type": "event", "payload": "old"},
-                {"type": "compacted", "payload": {"summary": "kept"}},
+                {"type": "summary", "payload": {"summary": "kept"}},
                 {"type": "event", "payload": "recent"},
             ])
             path.chmod(0o600)
             cut, _size, done, _marker = reclaim.truncate_file_at_marker(
-                path, reclaim.is_codex_compaction, "codex")
+                path, reclaim.is_claude_compaction, "claude")
             self.assertTrue(done)
             self.assertGreater(cut, 0)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(json.loads(path.read_text().splitlines()[0])["type"],
-                             "compacted")
+                             "summary")
 
     def test_invalid_json_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "rollout.jsonl"
-            path.write_bytes(b'{"type":"event"}\nnot-json\n{"type":"compacted"}\n')
+            path.write_bytes(b'{"type":"event"}\nnot-json\n{"type":"summary"}\n')
             before = path.read_bytes()
             result = reclaim.truncate_file_at_marker(
-                path, reclaim.is_codex_compaction, "codex")
+                path, reclaim.is_claude_compaction, "claude")
             self.assertFalse(result[2])
             self.assertEqual(path.read_bytes(), before)
 
@@ -103,7 +103,7 @@ class SubagentTests(unittest.TestCase):
             with mock.patch.object(reclaim, "PATHS", paths):
                 self.assertTrue(reclaim.codex_subagent_is_active(thread_id))
 
-    def test_closed_codex_subagent_removes_rollout_and_index_rows(self):
+    def test_codex_sessions_and_closed_subagents_are_preserved(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             sessions = root / "sessions"
@@ -116,6 +116,12 @@ class SubagentTests(unittest.TestCase):
                             "parent_thread_id": "parent",
                             "source": {"subagent": {"thread_spawn": {"depth": 1}}}},
             }])
+            user_rollout = sessions / "rollout-user.jsonl"
+            write_jsonl(user_rollout, [
+                {"type": "session_meta", "payload": {"id": "user"}},
+                {"type": "compacted", "payload": {"message": "summary"}},
+            ])
+            before = (rollout.read_bytes(), user_rollout.read_bytes())
             state = root / "state.sqlite"
             con = sqlite3.connect(state)
             con.executescript("""
@@ -144,17 +150,39 @@ class SubagentTests(unittest.TestCase):
                  mock.patch.object(reclaim, "database_in_use", return_value=False), \
                  redirect_stdout(io.StringIO()):
                 freed, entries = reclaim.apply_codex()
-            self.assertGreater(freed, 0)
-            self.assertFalse(rollout.exists())
-            self.assertEqual(entries[0]["action"], "delete_subagent")
+            self.assertEqual((freed, entries), (0, []))
+            self.assertEqual((rollout.read_bytes(), user_rollout.read_bytes()), before)
             con = sqlite3.connect(state)
-            self.assertEqual(con.execute("SELECT count(*) FROM threads").fetchone()[0], 0)
+            self.assertEqual(con.execute("SELECT count(*) FROM threads").fetchone()[0], 1)
             self.assertEqual(con.execute(
-                "SELECT count(*) FROM thread_spawn_edges").fetchone()[0], 0)
+                "SELECT count(*) FROM thread_spawn_edges").fetchone()[0], 1)
             con.close()
             con = sqlite3.connect(log_db)
-            self.assertEqual(con.execute("SELECT count(*) FROM logs").fetchone()[0], 0)
+            self.assertEqual(con.execute("SELECT count(*) FROM logs").fetchone()[0], 1)
             con.close()
+
+    def test_scan_codex_does_not_advertise_session_trimming(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            sessions = root / "sessions"
+            archived = root / "archived_sessions"
+            sessions.mkdir()
+            archived.mkdir()
+            write_jsonl(sessions / "rollout-user.jsonl", [
+                {"type": "session_meta", "payload": {"id": "user"}},
+                {"type": "compacted", "payload": {"message": "summary"}},
+            ])
+            write_jsonl(archived / "rollout-old.jsonl", [
+                {"type": "session_meta", "payload": {"id": "old"}},
+            ])
+            paths = dict(reclaim.PATHS)
+            paths.update({"codex_sessions": sessions, "codex_archived": archived})
+            with mock.patch.object(reclaim, "PATHS", paths):
+                result = reclaim.scan_codex()
+            self.assertGreater(result["total"], 0)
+            self.assertGreater(result["archived"], 0)
+            self.assertEqual(result["reclaim"], 0)
+            self.assertEqual(result["subagents_bytes"], 0)
 
 
 class MetricsTests(unittest.TestCase):

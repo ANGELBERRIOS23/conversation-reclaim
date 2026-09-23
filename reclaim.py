@@ -5,7 +5,7 @@ Analiza, respalda y reduce el almacenamiento de:
   - Claude Code   (~/.claude/projects)   recorta todo lo anterior a la última
                                           compactación (el resumen y lo reciente
                                           se conservan intactos)
-  - Codex         (~/.codex/sessions)    idem con sus eventos "compacted"
+  - Codex         (~/.codex/cache)        solo cachés; nunca rollouts de sesión
   - OpenCode      (opencode.db)          poda pre-compactación + evento-log
                                           redundante (integra opencode-db-prune)
                                           + snapshots + tool-output
@@ -40,7 +40,7 @@ from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home()
-VERSION = "3.2.0"
+VERSION = "3.6.1"
 MANIFEST_DIR = HOME / ".conversation-reclaim"
 TRANSIENT_MEDIA_MIN_AGE = 7 * 24 * 60 * 60
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -231,10 +231,6 @@ def is_claude_compaction(record):
             record.get("subtype") == "compact_boundary")
 
 
-def is_codex_compaction(record):
-    return isinstance(record, dict) and record.get("type") == "compacted"
-
-
 def is_antigravity_compaction(record):
     return (isinstance(record, dict) and
             record.get("type") == "CONVERSATION_HISTORY")
@@ -377,36 +373,17 @@ def scan_claude():
 
 def scan_codex():
     base = PATHS["codex_sessions"]
-    total = reclaim = compacted = 0
-    top = []
+    total = 0
     if not base.exists():
         return None
-    files = sorted(base.rglob("*.jsonl"))
-    subagents_bytes = subagents_n = active_subagents = 0
-    for f in files:
-        size = f.stat().st_size
-        total += size
-        sub = codex_subagent_info(f)
-        if sub:
-            if codex_subagent_is_active(sub["thread_id"], f):
-                active_subagents += 1
-            else:
-                subagents_bytes += size
-                subagents_n += 1
-            continue
-        last_marker, error = find_last_marker(f, is_codex_compaction)
-        if error:
-            continue
-        if last_marker >= 0:
-            compacted += 1
-            reclaim += last_marker
-            top.append((last_marker, size, str(f)))
+    for f in base.rglob("*.jsonl"):
+        total += f.stat().st_size
     archived = sum(p.stat().st_size for p in PATHS["codex_archived"].rglob("*")) \
         if PATHS["codex_archived"].exists() else 0
-    return {"total": total, "reclaim": reclaim, "compacted": compacted,
-            "archived": archived, "top": sorted(top, reverse=True),
-            "subagents_bytes": subagents_bytes, "subagents_n": subagents_n,
-            "active_subagents": active_subagents}
+    return {"total": total, "reclaim": 0, "compacted": 0,
+            "archived": archived, "top": [],
+            "subagents_bytes": 0, "subagents_n": 0,
+            "active_subagents": 0}
 
 
 def transient_media_candidates(reference_time=None):
@@ -667,9 +644,7 @@ def scan():
         ncomp = r.get("compacted", 0)
         if name == "Codex":
             extra = (f"  | archived_sessions: {human(r.get('archived',0))}"
-                     f" | subagentes cerrados: {human(r.get('subagents_bytes',0))} "
-                     f"({r.get('subagents_n',0)}), activos: {r.get('active_subagents',0)}")
-            disposable += r.get("subagents_bytes", 0)
+                     " | sesiones y subagentes protegidos")
         elif name == "Claude Code":
             extra = (f"  | subagentes: {human(r.get('subagents_bytes',0))} "
                      f"({r.get('subagents_n',0)}) + workflows "
@@ -1334,43 +1309,9 @@ def apply_claude():
 
 
 def apply_codex():
-    base = PATHS["codex_sessions"]
-    entries = []
-    freed = 0
-    if not base.exists():
-        return 0, entries
-    for f in sorted(base.rglob("*.jsonl")):
-        if codex_subagent_info(f):
-            continue
-        if database_in_use(f) is not False:
-            print(f"  {f.name[:30]}... en uso o no verificable; se omite")
-            continue
-        cut, size, done, marker = truncate_file_at_marker(f, is_codex_compaction, "codex")
-        if done:
-            freed += cut
-            entries.append({"tool": "codex", "action": "truncate", "file": str(f),
-                            "cut_bytes": cut, "old_size": size,
-                            "marker_offset": marker, "status": "applied", "time": now()})
-            print(f"  {Path(f).name[:30]}... {human(cut)} de {human(size)} {_('recortados')}")
-
-    candidates = []
-    for f in sorted(base.rglob("*.jsonl")):
-        info = codex_subagent_info(f)
-        if info and not codex_subagent_is_active(info["thread_id"], f):
-            candidates.append((f, info, f.stat().st_size))
-    if candidates:
-        total = sum(item[2] for item in candidates)
-        print(f"  AVISO: se eliminarán {len(candidates)} transcripts de subagentes "
-              f"Codex cerrados ({human(total)}); son artefactos de un solo uso.")
-    for path, info, size in candidates:
-        ok, reason = delete_codex_subagent(path, info)
-        if ok:
-            freed += size
-            entries.append(change_entry("codex", "delete_subagent", path, size,
-                                        thread_id=info["thread_id"]))
-        else:
-            print(f"  subagente {info['thread_id'][:12]}... se omite: {reason}")
-    return freed, entries
+    # Codex requires its initial session_meta record, and its UI reads the full
+    # rollout even after a compacted event. No session or subagent is disposable.
+    return 0, []
 
 
 def delete_codex_subagent(path, info):

@@ -115,7 +115,7 @@ English and it answers in English.
 | Tool | Storage | Compaction marker | What `apply` does |
 |---|---|---|---|
 | **Claude Code** | `~/.claude/projects/**/*.jsonl` | structured summary/compaction event | trims before the last marker + removes closed sidechains |
-| **Codex** | `~/.codex/sessions/**/rollout-*.jsonl` | top-level event `"type":"compacted"` | same + removes closed subagent rollouts/index rows |
+| **Codex** | `~/.codex/cache/` | — | removes regenerable cache files; all session and archived rollouts remain intact |
 | **OpenCode** | `~/.local/share/opencode/opencode.db` | part `type=compaction` with `tail_start_id` | `apply-db`: redundant streaming events + pre-compaction messages + VACUUM |
 | **OpenCode (files)** | `snapshot/`, `tool-output/`, `log/` | — | all local snapshots, tool outputs, logs |
 | **Antigravity / Gemini** | `~/.gemini/antigravity{,,-cli,-ide}/conversations/*.db` | steps `step_type 98` (CONVERSATION_HISTORY) | prunes pre-compaction steps + transcripts, scratch, logs, caches, `browser_recordings` |
@@ -150,11 +150,10 @@ project (use it directly if you only care about the DB).
   table.
 - Integrity checks (`PRAGMA integrity_check`) after DB operations.
 - Antigravity conversation DBs are skipped if the app has them open.
-- Closed Codex subagents are identified from structured `session_meta`; active
-  children are preserved whenever a writer lock or open spawn edge exists.
+- Codex session, archived, and subagent rollouts are never shortened or deleted.
 - Claude sidechains, including `agent-acompact-*`, are validated from their
   JSON metadata and deleted only when they are not open.
-- Before deleting subagent transcripts or Antigravity `browser_recordings`,
+- Before deleting Claude sidechains or Antigravity `browser_recordings`,
   the CLI prints their count and size. Browser recordings are already-consumed
   screenshots and Antigravity does not reuse them.
 - Temporary media is separate and **off by default**. `--only media` or
@@ -162,9 +161,26 @@ project (use it directly if you only care about the DB).
   Antigravity's explicit temporary-media folders. Files newer than seven days,
   files in use, symlinks, and images in normal brain/project folders are kept.
   An old conversation may lose its local image preview after this cleanup.
-- Cleanup may run from inside Codex: the current task, locked rollouts and live
-  log databases are skipped, while closed histories and other disposable data
-  remain eligible. A later run can reclaim the current task after it closes.
+- Cleanup may run from inside Codex: Codex rollouts are always preserved;
+  regenerable cache files remain eligible.
+
+### Repair rollouts damaged by earlier versions
+
+Earlier versions trimmed Codex files from a `compacted` event, removing the
+required leading `session_meta` record. First run a dry run:
+
+```bash
+python3 scripts/repair_codex_sessions.py
+```
+
+If you have a complete earlier Conversation Reclaim backup, pass its root with
+`--originals-root /path/to/conversation-reclaim-backup`. The repair tool uses a
+full original only when it ends with the current rollout. Otherwise it rebuilds
+the missing metadata from `~/.codex/state_5.sqlite`. To apply the plan, pass
+`--apply --backup-dir /path/to/new/empty/backup-directory`. A byte-for-byte
+copy of each current file is verified before replacement. A reconstructed
+header makes the retained transcript readable; it cannot restore history
+already removed by the earlier trim.
 - Skills are **only listed**, never deleted (duplicates can be deduplicated
   with symlinks).
 - Caches (tool-output, logs, snapshots, scratch) are safe to delete — prompt
