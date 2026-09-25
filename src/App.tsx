@@ -199,7 +199,7 @@ const demoScan: ScanResult = {
   warnings: [],
   categories: [
     { key: "claude", name: "Claude Code", descriptionEs: "Historial compactado y subagentes cerrados", descriptionEn: "Compacted history and closed subagents", logo: "claude", bytes: 894_435_328, items: 61, recommended: true, protected: true, available: true, details: [] },
-    { key: "codex", name: "Codex", descriptionEs: "Cachés y sesiones compactadas inactivas", descriptionEn: "Caches and inactive compacted sessions", logo: "codex", bytes: 341_835_776, items: 34, recommended: true, protected: true, available: true, details: [] },
+    { key: "codex", name: "Codex", descriptionEs: "Solo cachés regenerables; sesiones protegidas", descriptionEn: "Regenerable caches only; sessions protected", logo: "codex", bytes: 21_835_776, items: 4, recommended: true, protected: true, available: true, details: [] },
     { key: "opencode", name: "OpenCode", descriptionEs: "Archivos temporales, registros y snapshots", descriptionEn: "Temporary files, logs, and snapshots", logo: "opencode", bytes: 2_351_480_832, items: 418, recommended: false, protected: true, available: true, details: [] },
     { key: "antigravity", name: "Antigravity", descriptionEs: "Grabaciones del navegador y datos temporales", descriptionEn: "Browser recordings and temporary data", logo: "gemini", bytes: 884_695_040, items: 182, recommended: true, protected: true, available: true, details: [] },
     { key: "media", name: "Temporary media", descriptionEs: "Adjuntos temporales antiguos; las vistas previas pueden desaparecer", descriptionEn: "Old temporary attachments; previews may disappear", logo: "media", bytes: 487_587_840, items: 3603, recommended: false, protected: true, available: true, details: [] },

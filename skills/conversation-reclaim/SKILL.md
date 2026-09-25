@@ -3,8 +3,8 @@ name: conversation-reclaim
 description: >-
   Escanea y libera espacio acumulado por conversaciones de Claude Code, Codex,
   OpenCode, Antigravity/Gemini y Command Code. Recorta contenido anterior a la
-  última compactación, elimina caches, browser recordings, medios temporales
-  opcionales y transcripts de subagentes cerrados, ofrece respaldo opcional y registra cambios. Usar cuando
+  última compactación donde el formato lo permita, elimina caches, browser recordings,
+  medios temporales opcionales y sidechains cerrados de Claude, ofrece respaldo opcional y registra cambios. Usar cuando
   el usuario pida limpiar conversaciones, liberar espacio de agentes, revisar
   cuánto ocupan, eliminar compactaciones anteriores o encontrar skills duplicadas.
 ---
@@ -20,8 +20,8 @@ CLI Python sin dependencias externas.
 2. Explicar las categorías que se eliminarán. En particular:
    - `browser_recordings` son capturas ya consumidas por Antigravity; no se
      reutilizan. El CLI las elimina por defecto y avisa cantidad/tamaño.
-   - Los transcripts de subagentes son artefactos de un solo uso. El CLI borra
-     únicamente hijos cerrados y preserva los activos.
+   - Solo los sidechains cerrados de Claude son candidatos de limpieza.
+     Los rollouts de Codex, incluidos los de subagentes, se conservan.
    - OpenCode elimina todos sus snapshots locales, además de tool-output/logs.
    - Los adjuntos temporales son opcionales: solo `codex-clipboard-*` y
      `tempmediaStorage` de más de siete días. Avisar que una vista previa
@@ -50,6 +50,7 @@ CLI Python sin dependencias externas.
 | `python3 reclaim.py apply-db --no-backup` | Poda irreversible aceptando el riesgo. |
 | `python3 reclaim.py apply-db --no-backup --close-opencode` | Avisar, cerrar OpenCode normalmente y podar. |
 | `python3 reclaim.py restore --backup-dir <ruta>` | Imprime la guía de restauración manual. |
+| `python3 scripts/repair_codex_sessions.py` | Detecta rollouts de Codex cuyo encabezado fue retirado por versiones anteriores; solo lectura por defecto. |
 
 ## Comportamiento por herramienta
 
@@ -57,15 +58,13 @@ CLI Python sin dependencias externas.
   contenido reciente. Detectar sidechains con `isSidechain`, `agentId` y
   `sessionId`; borrar los cerrados, incluidos `agent-acompact-*`. No tocar
   `memory/` ni el transcript principal.
-- **Codex:** aceptar solo un evento JSON superior `type=compacted`. Detectar
-  hijos mediante `session_meta.payload.thread_source=subagent`, UUID y
-  `source.subagent`. Preservar si existe
-  `~/.codex/thread-writer-locks/<id>.lock` o un edge `open` en
-  `state_5.sqlite`; al borrar un hijo cerrado, retirar su rollout y filas de
-  índice/log asociadas. Nunca inferirlo solo por nombre o texto.
-  La limpieza puede ejecutarse desde Codex: omitir la tarea actual, rollouts
-  bloqueados y DB de logs abiertas; recuperar el resto y dejar lo activo para
-  una ejecución posterior.
+- **Codex:** no recortar ni borrar rollouts de `sessions` o
+  `archived_sessions`, incluidos los de subagentes. El evento `compacted` no
+  reemplaza el `session_meta` inicial ni todo el historial que muestra la app.
+  Limpiar solo cachés regenerables. Para rollouts ya dañados, usar
+  `scripts/repair_codex_sessions.py`: respaldo exacto antes de cada cambio,
+  restauración completa cuando exista un original que termine con el archivo
+  actual, o reconstrucción de metadatos desde `state_5.sqlite`.
 - **OpenCode archivos:** borrar snapshots, tool-output y logs. El mensaje debe
   decir “todos los snapshots”, no “huérfanos”.
 - **OpenCode DB:** ordenar compactaciones por sesión/tiempo/id, usar la última,
@@ -138,7 +137,7 @@ distribución pública pulida necesita firma/notarización del propietario.
 | Herramienta | Ruta | Marcador |
 |---|---|---|
 | Claude | `~/.claude/projects/<proyecto>/**/*.jsonl` | campos superiores de resumen/compactación |
-| Codex | `~/.codex/sessions/**/rollout-*.jsonl` | evento superior `type=compacted` |
+| Codex | `~/.codex/cache/` | solo cachés regenerables; no tocar rollouts |
 | OpenCode | `~/.local/share/opencode/opencode.db` | part compaction con `tail_start_id` |
 | Antigravity | `~/.gemini/antigravity{,,-cli,-ide}/conversations/*.db` | step `step_type=98` |
 | Command Code | `~/.commandcode/projects/` | ninguno conocido |

@@ -115,7 +115,7 @@ Pídele en español y responde en español; en inglés, en inglés.
 | Herramienta | Almacenamiento | Marcador de compactación | Qué hace `apply` |
 |---|---|---|---|
 | **Claude Code** | `~/.claude/projects/**/*.jsonl` | evento estructurado de resumen/compactación | recorta antes del último marcador + elimina sidechains cerrados |
-| **Codex** | `~/.codex/sessions/**/rollout-*.jsonl` | evento superior `"type":"compacted"` | igual + elimina rollouts/índices de subagentes cerrados |
+| **Codex** | `~/.codex/cache/` | — | elimina cachés regenerables; conserva intactos todos los rollouts de sesión y archivados |
 | **OpenCode** | `~/.local/share/opencode/opencode.db` | part `type=compaction` con `tail_start_id` | `apply-db`: eventos de streaming redundantes + mensajes pre-compactación + VACUUM |
 | **OpenCode (archivos)** | `snapshot/`, `tool-output/`, `log/` | — | todos los snapshots locales, tool-outputs y logs |
 | **Antigravity / Gemini** | `~/.gemini/antigravity{,,-cli,-ide}/conversations/*.db` | pasos `step_type 98` (CONVERSATION_HISTORY) | poda pasos pre-compactación + transcripts, scratch, logs, caches, `browser_recordings` |
@@ -152,11 +152,11 @@ esos eventos redundantes, luego poda los mensajes pre-compactación y hace
   eventos.
 - Verificación de integridad (`PRAGMA integrity_check`) tras operar en DBs.
 - Las DB de conversación de Antigravity se omiten si la app las tiene abiertas.
-- Los subagentes Codex cerrados se identifican mediante `session_meta`; los
-  activos se preservan si existe un writer lock o un spawn edge abierto.
+- Nunca recorta ni elimina rollouts de Codex, incluidos los archivados y los
+  de subagentes.
 - Los sidechains de Claude, incluidos `agent-acompact-*`, se validan mediante
   sus metadatos JSON y solo se eliminan cuando no están abiertos.
-- Antes de borrar transcripts de subagentes o `browser_recordings`, el CLI
+- Antes de borrar sidechains de Claude o `browser_recordings`, el CLI
   muestra cantidad y tamaño. Las grabaciones son capturas ya consumidas que
   Antigravity no reutiliza.
 - Los medios temporales están separados y **desmarcados por defecto**.
@@ -165,9 +165,26 @@ esos eventos redundantes, luego poda los mensajes pre-compactación y hace
   de Antigravity. Conserva archivos de menos de siete días, abiertos, symlinks
   e imágenes en carpetas normales de proyectos/brain. Una conversación antigua
   puede perder su vista previa local después de esta limpieza.
-- Se puede limpiar desde Codex: la tarea actual, rollouts bloqueados y DB de
-  logs activas se omiten; los historiales cerrados sí se limpian. Una ejecución
-  posterior puede recuperar la tarea actual una vez cerrada.
+- Se puede limpiar desde Codex: todos los rollouts quedan protegidos; solo
+  sus archivos de caché regenerables siguen siendo elegibles.
+
+### Reparar rollouts dañados por versiones anteriores
+
+Las versiones anteriores recortaban desde un evento `compacted` y quitaban el
+`session_meta` inicial que Codex necesita. Primero revisa el plan sin cambios:
+
+```bash
+python3 scripts/repair_codex_sessions.py
+```
+
+Si tienes un respaldo completo previo de Conversation Reclaim, pasa su raíz
+con `--originals-root /ruta/al/respaldo`. Solo se restaura el original completo
+si termina exactamente con el rollout actual. En los demás casos, se reconstruye
+el encabezado a partir de `~/.codex/state_5.sqlite`. Para aplicarlo, usa
+`--apply --backup-dir /ruta/a/una/carpeta/nueva`. Antes de reemplazar cada
+archivo, la herramienta crea y verifica una copia exacta del archivo actual.
+El encabezado reconstruido permite leer el historial que queda, pero no puede
+recuperar los mensajes que la versión anterior ya recortó.
 - Las skills **solo se listan, nunca se borran** (las repetidas se pueden
   deduplicar con symlinks).
 - Los caches (tool-output, logs, snapshots, scratch) son seguros de borrar —
