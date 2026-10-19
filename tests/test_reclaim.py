@@ -455,5 +455,136 @@ class OpenCodeTests(unittest.TestCase):
         request_close.assert_not_called()
 
 
+class OpenCodeV2Tests(unittest.TestCase):
+    """OpenCode 2 importa las sesiones de OpenCode 1 a session_v2/session_message
+    y deja la copia vieja en message/part."""
+
+    def make_db(self, path, phase="completed", with_v1=True):
+        con = sqlite3.connect(path)
+        con.executescript("""
+            CREATE TABLE event(id INTEGER PRIMARY KEY, type TEXT, data TEXT);
+            CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE session_v2(id TEXT PRIMARY KEY, time_created INTEGER);
+            CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT,
+                                         type TEXT, seq INTEGER, data TEXT);
+        """)
+        if phase:
+            con.execute("INSERT INTO kv VALUES ('migration.v1-v2', ?)",
+                        (json.dumps({"phase": phase}),))
+        for sid in ("s1", "s2"):
+            con.execute("INSERT INTO session_v2 VALUES (?, 1)", (sid,))
+            con.execute("INSERT INTO session_message VALUES (?, ?, 'user', 0, ?)",
+                        (f"u-{sid}", sid, json.dumps({"text": "pregunta"})))
+            con.execute("INSERT INTO session_message VALUES (?, ?, 'assistant', 1, ?)",
+                        (f"a-{sid}", sid, json.dumps({"content": [
+                            {"type": "text", "text": "respuesta completa"}]})))
+        if with_v1:
+            con.executescript("""
+                CREATE TABLE session(id TEXT PRIMARY KEY, time_created INTEGER);
+                CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT,
+                                     time_created INTEGER);
+                CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT,
+                                  data TEXT, time_created INTEGER);
+            """)
+            for sid in ("s1", "s2"):
+                con.execute("INSERT INTO session VALUES (?, 1)", (sid,))
+                con.execute("INSERT INTO message VALUES (?, ?, '{}', 1)", (f"m-{sid}", sid))
+                con.execute("INSERT INTO part VALUES (?, ?, ?, ?, 1)",
+                            (f"p-{sid}", f"m-{sid}", sid,
+                             json.dumps({"type": "text", "text": "respuesta completa"})))
+            # s2 tiene un razonamiento que OpenCode 2 no importó: su copia se queda.
+            con.execute("INSERT INTO part VALUES ('p-extra', 'm-s2', 's2', ?, 2)",
+                        (json.dumps({"type": "reasoning", "text": "solo en la copia vieja"}),))
+        con.commit()
+        con.close()
+
+    def prune(self, db, root, **kwargs):
+        paths = dict(reclaim.PATHS)
+        paths["opencode_db"] = db
+        with mock.patch.object(reclaim, "PATHS", paths), \
+             mock.patch.object(reclaim, "MANIFEST_DIR", root / "manifests"), \
+             mock.patch.object(reclaim, "database_in_use", return_value=False), \
+             redirect_stdout(io.StringIO()):
+            return reclaim.prune_opencode_db(no_backup=True, **kwargs)
+
+    def v1_sessions(self, db):
+        con = sqlite3.connect(db)
+        rows = sorted(r[0] for r in con.execute("SELECT DISTINCT session_id FROM message"))
+        con.close()
+        return rows
+
+    def test_drop_v1_copy_only_drops_verified_sessions(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db = root / "opencode.db"
+            self.make_db(db)
+            self.assertEqual(self.prune(db, root, drop_v1_copy=True), 0)
+            self.assertEqual(self.v1_sessions(db), ["s2"])
+            con = sqlite3.connect(db)
+            self.assertEqual(con.execute("SELECT count(*) FROM session_message").fetchone()[0], 4)
+            self.assertEqual(con.execute("SELECT count(*) FROM session").fetchone()[0], 2)
+            con.close()
+
+    def test_without_flag_the_v1_copy_is_untouched(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db = root / "opencode.db"
+            self.make_db(db)
+            self.assertEqual(self.prune(db, root), 0)
+            self.assertEqual(self.v1_sessions(db), ["s1", "s2"])
+
+    def test_v1_copy_is_kept_while_import_is_pending(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db = root / "opencode.db"
+            self.make_db(db, phase="sessions")
+            self.assertEqual(self.prune(db, root, drop_v1_copy=True), 0)
+            self.assertEqual(self.v1_sessions(db), ["s1", "s2"])
+
+    def test_fresh_v2_database_without_v1_tables(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db = root / "opencode.db"
+            self.make_db(db, phase=None, with_v1=False)
+            self.assertEqual(self.prune(db, root, drop_v1_copy=True), 0)
+            paths = dict(reclaim.PATHS)
+            paths["opencode_db"] = db
+            with mock.patch.object(reclaim, "PATHS", paths):
+                result = reclaim.scan_opencode()
+            self.assertEqual(result["v1_copy"], (0, 0))
+            self.assertEqual(result["redundant"], (0, 0))
+
+    def test_scan_reports_the_v1_copy(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "opencode.db"
+            self.make_db(db)
+            paths = dict(reclaim.PATHS)
+            paths["opencode_db"] = db
+            with mock.patch.object(reclaim, "PATHS", paths):
+                result = reclaim.scan_opencode()
+            self.assertEqual(result["v1_copy"][0], 2)
+            self.assertGreater(result["v1_copy"][1], 0)
+            self.assertEqual(result["compactions"], 0)
+
+    def test_close_stops_v2_background_service_instead_of_the_app(self):
+        users = [{"pid": 24337, "command": "opencode.exe"}]
+        with mock.patch.object(reclaim, "database_users", return_value=users), \
+             mock.patch.object(reclaim, "process_is_current_ancestor", return_value=False), \
+             mock.patch.object(reclaim, "stop_opencode_service", return_value=True) as stop, \
+             mock.patch.object(reclaim, "database_in_use", return_value=False), \
+             mock.patch.object(reclaim.sys, "platform", "darwin"), \
+             mock.patch.object(reclaim.subprocess, "run") as run, \
+             redirect_stdout(io.StringIO()):
+            self.assertTrue(reclaim.close_opencode_for_cleanup("/tmp/opencode.db"))
+        stop.assert_called_once()
+        run.assert_not_called()
+
+    def test_service_is_not_stopped_when_cli_is_v1(self):
+        with mock.patch.object(reclaim, "_opencode_cli_major", return_value=1), \
+             mock.patch.object(reclaim.subprocess, "run") as run:
+            self.assertFalse(reclaim.stop_opencode_service())
+        run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

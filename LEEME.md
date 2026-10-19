@@ -94,6 +94,7 @@ python3 reclaim.py apply --only media         # solo adjuntos temporales antiguo
 python3 reclaim.py apply --include-media      # incluir adjuntos temporales en una limpieza completa
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO   # poda opencode.db (opencode cerrado; respaldo obligatorio o --no-backup)
 python3 reclaim.py apply-db --no-backup --close-opencode  # avisa, cierra OpenCode normalmente y poda
+python3 reclaim.py apply-db --backup-dir /Volumes/DISCO --drop-v1-copy  # OpenCode 2: borra también la copia vieja de OpenCode 1
 python3 reclaim.py skills                  # lista skills y detecta repetidas
 python3 reclaim.py restore --backup-dir /ruta
 ```
@@ -116,7 +117,7 @@ Pídele en español y responde en español; en inglés, en inglés.
 |---|---|---|---|
 | **Claude Code** | `~/.claude/projects/**/*.jsonl` | evento estructurado de resumen/compactación | recorta antes del último marcador + elimina sidechains cerrados |
 | **Codex** | `~/.codex/cache/` | — | elimina cachés regenerables; conserva intactos todos los rollouts de sesión y archivados |
-| **OpenCode** | `~/.local/share/opencode/opencode.db` | part `type=compaction` con `tail_start_id` | `apply-db`: eventos de streaming redundantes + mensajes pre-compactación + VACUUM |
+| **OpenCode** | `~/.local/share/opencode/opencode.db` | part `type=compaction` con `tail_start_id` | `apply-db`: eventos de streaming redundantes + mensajes pre-compactación + VACUUM. OpenCode 2: `--drop-v1-copy` borra la copia de OpenCode 1 que queda al actualizar |
 | **OpenCode (archivos)** | `snapshot/`, `tool-output/`, `log/` | — | todos los snapshots locales, tool-outputs y logs |
 | **Antigravity / Gemini** | `~/.gemini/antigravity{,,-cli,-ide}/conversations/*.db` | pasos `step_type 98` (CONVERSATION_HISTORY) | poda pasos pre-compactación + transcripts, scratch, logs, caches, `browser_recordings` |
 | **Medios temporales (opcional)** | temporales del sistema `codex-clipboard-*` y `tempmediaStorage` de Antigravity | más de 7 días, archivo regular y cerrado | borra solo imágenes temporales identificadas estructuralmente; una vista previa antigua puede desaparecer |
@@ -133,6 +134,32 @@ esos eventos redundantes, luego poda los mensajes pre-compactación y hace
 [opencode-db-prune](https://github.com/ANGELBERRIOS23/opencode-db-prune)
 (úsalo directo si solo te interesa la base de datos).
 
+### OpenCode 2
+
+OpenCode 2 vacía ese log de eventos por su cuenta, pero la primera vez que
+arranca copia todas las conversaciones a tablas nuevas (`session_v2` /
+`session_message`) y deja la copia de OpenCode 1 (`message` / `part`). Anota la
+importación en `kv` como `migration.v1-v2 = completed` y ya no vuelve a leer la
+copia vieja, así que después de actualizar cada conversación está dos veces en
+la base.
+
+`scan` muestra esa copia junto a OpenCode como *copia de OpenCode 1*.
+`apply-db --drop-v1-copy` la borra sesión por sesión, y solo cuando cada texto,
+bloque de razonamiento y salida de herramienta de la copia vieja también está en
+las tablas nuevas; la sesión que no pasa esa revisión conserva su copia. En una
+actualización real (120 sesiones) borró 114, conservó 6 y bajó la base de
+269 MB a 143 MB, y OpenCode 2 exportó igualita una sesión de 261 mensajes antes
+y después.
+
+Otras dos diferencias con OpenCode 2:
+
+- Si OpenCode 2 ya importó las sesiones, `apply-db` ya no poda los mensajes
+  pre-compactación de la copia vieja: en las sesiones que no pasan la revisión,
+  ahí puede estar lo único que falta en la copia nueva.
+- La base la tiene abierta el servicio de fondo de OpenCode 2, no una ventana.
+  `--close-opencode` lo detiene con `opencode service stop`; nunca mata el
+  proceso.
+
 ## Seguridad
 
 - **Respaldo opcional pero recomendado.** `apply` sin `--backup-dir` no copia
@@ -141,7 +168,11 @@ esos eventos redundantes, luego poda los mensajes pre-compactación y hace
   interrumpida deja los originales intactos — ver la skill para las recetas
   manuales de respaldo).
 - `apply-db` exige un respaldo explícito (`--backup-dir`) o `--no-backup`.
-- Refusa tocar `opencode.db` mientras opencode esté corriendo.
+- Refusa tocar `opencode.db` mientras opencode esté corriendo. Con OpenCode 2
+  eso incluye su servicio de fondo (`opencode service stop`).
+- `--drop-v1-copy` solo actúa cuando OpenCode 2 ya marcó su importación como
+  terminada, y solo en sesiones cuya copia vieja está completa en las tablas
+  nuevas.
 - `--close-opencode` avisa y solicita el cierre normal de la app en macOS o
   Windows. En Windows usa Restart Manager para identificar los PID exactos y
   envía `WM_CLOSE`; nunca usa `taskkill` forzado. Se

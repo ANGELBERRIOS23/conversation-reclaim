@@ -49,6 +49,7 @@ CLI Python sin dependencias externas.
 | `python3 reclaim.py apply-db --backup-dir <ruta>` | Poda transaccional de `opencode.db`. |
 | `python3 reclaim.py apply-db --no-backup` | Poda irreversible aceptando el riesgo. |
 | `python3 reclaim.py apply-db --no-backup --close-opencode` | Avisar, cerrar OpenCode normalmente y podar. |
+| `python3 reclaim.py apply-db --backup-dir <ruta> --drop-v1-copy` | OpenCode 2: además borra la copia de OpenCode 1 que quedó al actualizar. |
 | `python3 reclaim.py restore --backup-dir <ruta>` | Imprime la guía de restauración manual. |
 | `python3 scripts/repair_codex_sessions.py` | Detecta rollouts de Codex cuyo encabezado fue retirado por versiones anteriores; solo lectura por defecto. |
 
@@ -76,6 +77,17 @@ CLI Python sin dependencias externas.
   Manager y solicitar `WM_CLOSE`; en macOS usar el quit normal. Nunca forzar. Si el PID
   que mantiene la DB es ancestro/anfitrión del CLI, rehusar cerrarlo y pedir que
   se ejecute desde Terminal, Codex u otro harness externo.
+- **OpenCode 2:** detectar la versión por las tablas (`session_v2` +
+  `session_message`; OpenCode 1 ya tenía `session_message` vacía) y por
+  `kv.migration.v1-v2`. OpenCode 2 vacía `event` por su cuenta y deja la copia
+  de OpenCode 1 en `message`/`part`. Con la importación en `completed`:
+  no podar pre-compactación sobre esa copia; `--drop-v1-copy` la borra solo en
+  las sesiones cuyo texto, razonamiento y salidas de herramientas están todos
+  en `session_message`, y deja las filas de `session`. Si la importación no
+  terminó, no tocar la copia. La DB la mantiene abierta el servicio de fondo
+  (`opencode.exe serve --service`): `--close-opencode` lo detiene con
+  `opencode service stop`, nunca con kill. Avisar al usuario de que, si vuelve
+  a OpenCode 1, las sesiones limpiadas aparecerán sin mensajes.
 - **Antigravity:** recortar transcripts estructuralmente, podar pasos anteriores
   al último `step_type=98`, omitir DB abiertas y limpiar logs, crashes, cache,
   scratch y browser recordings con aviso previo.
@@ -138,7 +150,7 @@ distribución pública pulida necesita firma/notarización del propietario.
 |---|---|---|
 | Claude | `~/.claude/projects/<proyecto>/**/*.jsonl` | campos superiores de resumen/compactación |
 | Codex | `~/.codex/cache/` | solo cachés regenerables; no tocar rollouts |
-| OpenCode | `~/.local/share/opencode/opencode.db` | part compaction con `tail_start_id` |
+| OpenCode | `~/.local/share/opencode/opencode.db` | part compaction con `tail_start_id` (OpenCode 1); en OpenCode 2, copia vieja verificada contra `session_message` |
 | Antigravity | `~/.gemini/antigravity{,,-cli,-ide}/conversations/*.db` | step `step_type=98` |
 | Command Code | `~/.commandcode/projects/` | ninguno conocido |
 

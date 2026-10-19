@@ -8,7 +8,10 @@ Analiza, respalda y reduce el almacenamiento de:
   - Codex         (~/.codex/cache)        solo cachés; nunca rollouts de sesión
   - OpenCode      (opencode.db)          poda pre-compactación + evento-log
                                           redundante (integra opencode-db-prune)
-                                          + snapshots + tool-output
+                                          + snapshots + tool-output. Con
+                                          OpenCode 2: la copia de OpenCode 1
+                                          que queda tras actualizar
+                                          (apply-db --drop-v1-copy)
   - Command Code  (~/.commandcode)       solo escaneo/backup (sin marcadores)
 
 Antes de tocar muestra las categorías destructivas. Si se indica un destino,
@@ -27,6 +30,7 @@ Solo requiere la librería estándar de Python 3.8+.
 import argparse
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -127,6 +131,18 @@ _T = {
     "adjuntos antiguos": "old attachments",
     "AVISO: puede quitar vistas previas de imágenes en conversaciones antiguas.":
         "WARNING: this can remove image previews from old conversations.",
+    "copia de OpenCode 1:": "OpenCode 1 copy:",
+    "(apply-db --drop-v1-copy)": "(apply-db --drop-v1-copy)",
+    "OpenCode 2 no ha terminado de importar las sesiones de OpenCode 1; no se toca su copia.":
+        "OpenCode 2 has not finished importing OpenCode 1 sessions; their copy is left alone.",
+    "--drop-v1-copy: esta base no tiene copia de OpenCode 1 junto a tablas de OpenCode 2.":
+        "--drop-v1-copy: this database has no OpenCode 1 copy next to OpenCode 2 tables.",
+    "copia de OpenCode 1 borrada:": "OpenCode 1 copy dropped:",
+    "sesiones": "sessions",
+    "se conservan (tienen piezas solo en la copia vieja):":
+        "kept (they have pieces only in the old copy):",
+    "Servicio de fondo de OpenCode 2 detenido; la DB quedó libre.":
+        "OpenCode 2 background service stopped; the DB is free.",
 }
 
 
@@ -139,6 +155,67 @@ def _(s):
 # Los marcadores se validan sobre JSON estructurado. Buscar substrings en una
 # línea podría confundir contenido citado con un evento real de compactación.
 OPENCODE_REDUNDANT_EVENTS = ("message.updated.1", "message.part.updated.1", "session.updated.1")
+
+# OpenCode 2 importa una sola vez las sesiones de OpenCode 1 a session_v2 /
+# session_message, vacía `event` y anota la fase en `kv`. Con "completed" ya no
+# vuelve a leer message/part, pero tampoco las borra: la conversación queda dos
+# veces en la base.
+OPENCODE_V1_MIGRATION_KEY = "migration.v1-v2"
+
+
+def opencode_layout(cur):
+    """Qué versión de OpenCode escribió la base. OpenCode 1 ya creaba una
+    tabla session_message vacía, así que la marca de la 2 es session_v2."""
+    tables = {r[0] for r in cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    phase = None
+    if "kv" in tables:
+        row = cur.execute("SELECT value FROM kv WHERE key=?",
+                          (OPENCODE_V1_MIGRATION_KEY,)).fetchone()
+        if row:
+            try:
+                phase = json.loads(row[0]).get("phase")
+            except (ValueError, AttributeError):
+                phase = "unreadable"
+    return {"v1": {"session", "message", "part"} <= tables,
+            "v2": {"session_v2", "session_message"} <= tables,
+            "event": "event" in tables,
+            "migration": phase}
+
+
+def _collect_strings(obj, out):
+    if isinstance(obj, str):
+        out.append(obj)
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            _collect_strings(value, out)
+    elif isinstance(obj, list):
+        for value in obj:
+            _collect_strings(value, out)
+
+
+def opencode_v1_copy_is_redundant(cur, session):
+    """¿Cada texto, razonamiento y salida de herramienta de la copia de
+    OpenCode 1 de esta sesión está también en session_message?"""
+    if not cur.execute("SELECT 1 FROM session_v2 WHERE id=?", (session,)).fetchone():
+        return False
+    strings = []
+    for (data,) in cur.execute(
+            "SELECT data FROM session_message WHERE session_id=?", (session,)):
+        try:
+            _collect_strings(json.loads(data), strings)
+        except ValueError:
+            continue
+    if not strings:
+        return False
+    corpus = "\x00".join(strings)
+    for (content,) in cur.execute(
+            "SELECT coalesce(json_extract(data,'$.text'), json_extract(data,'$.state.output')) "
+            "FROM part WHERE message_id IN (SELECT id FROM message WHERE session_id=?) "
+            "AND json_extract(data,'$.type') IN ('text','reasoning','tool')", (session,)):
+        if isinstance(content, str) and content.strip() and content.strip() not in corpus:
+            return False
+    return True
 
 # Rutas a tocar (multiplataforma: macOS/Linux usan HOME; Windows usa USERPROFILE
 # y %APPDATA% para las apps de escritorio de Antigravity)
@@ -448,17 +525,33 @@ def scan_opencode():
     page_size = cur.execute("PRAGMA page_size").fetchone()[0]
     page_count = cur.execute("PRAGMA page_count").fetchone()[0]
     db_total = page_size * page_count
-    ev = cur.execute("SELECT count(*), coalesce(sum(length(data)),0) FROM event").fetchone()
-    red = cur.execute(
-        f"SELECT count(*), coalesce(sum(length(data)),0) FROM event "
-        f"WHERE type IN ({','.join('?'*3)})",
-        OPENCODE_REDUNDANT_EVENTS).fetchone()
+    layout = opencode_layout(cur)
+    ev = red = (0, 0)
+    if layout["event"]:
+        ev = cur.execute("SELECT count(*), coalesce(sum(length(data)),0) FROM event").fetchone()
+        red = cur.execute(
+            f"SELECT count(*), coalesce(sum(length(data)),0) FROM event "
+            f"WHERE type IN ({','.join('?'*3)})",
+            OPENCODE_REDUNDANT_EVENTS).fetchone()
+
+    # Con OpenCode 2 ya importado, message/part son una copia completa que
+    # OpenCode 2 no lee: se reporta entera (hasta cuánto se libera) y no se
+    # estima además la poda pre-compactación sobre esa misma copia.
+    v1_copy = (0, 0)
+    imported = layout["v2"] and layout["migration"] == "completed"
+    if imported and layout["v1"]:
+        v1_copy = (
+            cur.execute("SELECT count(DISTINCT session_id) FROM message").fetchone()[0],
+            cur.execute("SELECT coalesce(sum(length(data)),0) FROM message").fetchone()[0]
+            + cur.execute("SELECT coalesce(sum(length(data)),0) FROM part").fetchone()[0])
 
     reclaim = 0
-    rows = cur.execute(
-        "SELECT session_id, id, data FROM part "
-        "WHERE json_extract(data,'$.type')='compaction' ORDER BY session_id, time_created"
-    ).fetchall()
+    rows = []
+    if layout["v1"] and not imported:
+        rows = cur.execute(
+            "SELECT session_id, id, data FROM part "
+            "WHERE json_extract(data,'$.type')='compaction' ORDER BY session_id, time_created"
+        ).fetchall()
     comps = defaultdict(list)
     for r in rows:
         comps[r[0]].append(json.loads(r[2]))
@@ -491,7 +584,8 @@ def scan_opencode():
         reclaim += mlen + plen
     con.close()
     return {"db_total": db_total, "events": ev, "redundant": red,
-            "compactions": len(comps), "reclaim": reclaim}
+            "compactions": len(comps), "reclaim": reclaim,
+            "layout": layout, "v1_copy": v1_copy}
 
 
 def dir_size(p):
@@ -653,8 +747,12 @@ def scan():
         if name == "OpenCode":
             extra = (f"  | {_('eventos redundantes:')} {human(r['redundant'][1])} "
                      f"({r['redundant'][0]:,} {_('filas')})")
+            v1_sessions, v1_bytes = r.get("v1_copy", (0, 0))
+            if v1_bytes:
+                extra += (f" | {_('copia de OpenCode 1:')} {human(v1_bytes)} "
+                          f"({v1_sessions} {_('sesiones')}) {_('(apply-db --drop-v1-copy)')}")
             ncomp = r.get("compactions", 0)
-            disposable += r["redundant"][1] or 0
+            disposable += (r["redundant"][1] or 0) + v1_bytes
         elif name == "Antigravity":
             extra = (f"  | WAL: {human(r.get('wal_total',0))} | brain: "
                      f"{human(r.get('brain',0))} | recordings: "
@@ -944,6 +1042,33 @@ def _request_windows_process_close(pids):
     return found
 
 
+def _opencode_cli_major():
+    """Versión mayor del `opencode` instalado, o None si no se sabe."""
+    exe = shutil.which("opencode")
+    if not exe:
+        return None
+    try:
+        out = subprocess.run([exe, "--version"], capture_output=True,
+                             text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"(\d+)\.\d+\.\d+", out) if isinstance(out, str) else None
+    return int(match.group(1)) if match else None
+
+
+def stop_opencode_service():
+    """OpenCode 2 deja un servicio de fondo con la DB abierta aunque no haya
+    ninguna ventana. Se detiene con su propio comando; nunca se mata."""
+    if (_opencode_cli_major() or 0) < 2:
+        return False
+    try:
+        result = subprocess.run([shutil.which("opencode"), "service", "stop"],
+                                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
 def close_opencode_for_cleanup(db):
     """Cierra OpenCode solo si no es el proceso anfitrión del propio CLI."""
     users = database_users(db)
@@ -961,6 +1086,16 @@ def close_opencode_for_cleanup(db):
             return False
     names = ", ".join(f"{u['command']} PID {u['pid']}" for u in users)
     print(f"  AVISO: se cerrará OpenCode para liberar la DB ({names}).")
+    # Un proceso de terminal (opencode, opencode.exe) y no la app "OpenCode":
+    # con OpenCode 2 es su servicio de fondo, que no tiene ventana que cerrar.
+    if any(u["command"] != "OpenCode" and u["command"].lower().startswith("opencode")
+           for u in users) and stop_opencode_service():
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if database_in_use(db) is False:
+                print(f"  {_('Servicio de fondo de OpenCode 2 detenido; la DB quedó libre.')}")
+                return True
+            time.sleep(0.25)
     if _IS_WIN:
         if any("opencode" not in user["command"].lower() for user in users):
             print("  REFUSED: la DB está abierta por un proceso que no se identificó como OpenCode.")
@@ -1423,8 +1558,13 @@ def chunks(values, size=400):
         yield values[start:start + size]
 
 
-def prune_opencode_db(backup_dir=None, no_backup=False, close_opencode=False):
-    """Poda OpenCode bajo bloqueo SQLite, una transacción y verificación."""
+def prune_opencode_db(backup_dir=None, no_backup=False, close_opencode=False,
+                      drop_v1_copy=False):
+    """Poda OpenCode bajo bloqueo SQLite, una transacción y verificación.
+
+    Con OpenCode 2 ya importado, drop_v1_copy borra la copia de OpenCode 1
+    (message/part) de cada sesión cuyo contenido completo está en
+    session_message; las demás se dejan como están."""
     db = PATHS["opencode_db"]
     if not db.exists():
         print(f"  {_('no existe opencode.db')}")
@@ -1444,6 +1584,7 @@ def prune_opencode_db(backup_dir=None, no_backup=False, close_opencode=False):
             print(f"  REFUSED: opencode.db {detail}.")
             if in_use:
                 print("  Reintenta con --close-opencode para avisar y cerrar OpenCode de forma normal.")
+                print("  OpenCode 2 deja un servicio de fondo con la DB abierta: `opencode service stop`.")
             return 2
     else:
         print("  Windows: asegúrate de que opencode esté completamente cerrado.")
@@ -1475,8 +1616,11 @@ def prune_opencode_db(backup_dir=None, no_backup=False, close_opencode=False):
             print("  REFUSED: la DB ya falla integrity_check.")
             return 6
 
+        layout = opencode_layout(cur)
+        imported = layout["v2"] and layout["migration"] == "completed"
+
         # Antes de retirar el event log, cada sesión debe tener parts materializados.
-        unsafe = cur.execute(
+        unsafe = layout["v1"] and cur.execute(
             "SELECT s.id FROM session s WHERE EXISTS (SELECT 1 FROM message m WHERE m.session_id=s.id) "
             "AND NOT EXISTS (SELECT 1 FROM part p JOIN message m ON m.id=p.message_id "
             "WHERE m.session_id=s.id) LIMIT 1").fetchone()
@@ -1484,10 +1628,16 @@ def prune_opencode_db(backup_dir=None, no_backup=False, close_opencode=False):
             print(f"  {_('REFUSED: el contenido solo existe en la tabla event. No se toca.')}")
             return 3
 
-        rows = cur.execute(
-            "SELECT session_id, id, data FROM part "
-            "WHERE json_extract(data,'$.type')='compaction' "
-            "ORDER BY session_id, time_created, id").fetchall()
+        # Con OpenCode 2 ya importado, message/part es una copia que OpenCode 2
+        # no lee. No se poda por compactación: en las sesiones que no pasan la
+        # verificación, lo anterior a la compactación puede ser lo único que
+        # falta en la copia nueva.
+        rows = []
+        if layout["v1"] and not imported:
+            rows = cur.execute(
+                "SELECT session_id, id, data FROM part "
+                "WHERE json_extract(data,'$.type')='compaction' "
+                "ORDER BY session_id, time_created, id").fetchall()
         latest = {}
         for sid, _part_id, data in rows:
             try:
@@ -1512,17 +1662,20 @@ def prune_opencode_db(backup_dir=None, no_backup=False, close_opencode=False):
                     "(SELECT id FROM message WHERE session_id=?) LIMIT 1", (sess,)).fetchone():
                 plans.append((sess, ids[:idx]))
 
-        red = cur.execute(
-            f"SELECT count(*), coalesce(sum(length(data)),0) FROM event "
-            f"WHERE type IN ({','.join('?' * len(OPENCODE_REDUNDANT_EVENTS))})",
-            OPENCODE_REDUNDANT_EVENTS).fetchone()
+        red = (0, 0)
+        if layout["event"]:
+            red = cur.execute(
+                f"SELECT count(*), coalesce(sum(length(data)),0) FROM event "
+                f"WHERE type IN ({','.join('?' * len(OPENCODE_REDUNDANT_EVENTS))})",
+                OPENCODE_REDUNDANT_EVENTS).fetchone()
         print(f"  {_('tamaño antes:')} {human(size_before)}")
         print(f"  {_('eventos redundantes:')} {red[0]:,} {_('filas')}, {human(red[1])}")
 
         cur.execute("BEGIN IMMEDIATE")
-        cur.execute(f"DELETE FROM event WHERE type IN "
-                    f"({','.join('?' * len(OPENCODE_REDUNDANT_EVENTS))})",
-                    OPENCODE_REDUNDANT_EVENTS)
+        if layout["event"]:
+            cur.execute(f"DELETE FROM event WHERE type IN "
+                        f"({','.join('?' * len(OPENCODE_REDUNDANT_EVENTS))})",
+                        OPENCODE_REDUNDANT_EVENTS)
         pruned_messages = 0
         for sess, waste in plans:
             pids = []
@@ -1539,6 +1692,27 @@ def prune_opencode_db(backup_dir=None, no_backup=False, close_opencode=False):
                 cur.execute(f"DELETE FROM message WHERE id IN ({q})", batch)
             pruned_messages += len(waste)
             print(f"  sesión {str(sess)[:14]}...: {len(waste)} mensajes pre-compactación podados")
+
+        dropped, kept = [], []
+        if drop_v1_copy and imported and layout["v1"]:
+            for (sess,) in cur.execute(
+                    "SELECT DISTINCT session_id FROM message").fetchall():
+                if opencode_v1_copy_is_redundant(cur, sess):
+                    cur.execute("DELETE FROM part WHERE message_id IN "
+                                "(SELECT id FROM message WHERE session_id=?)", (sess,))
+                    cur.execute("DELETE FROM message WHERE session_id=?", (sess,))
+                    dropped.append(sess)
+                else:
+                    kept.append(sess)
+            print(f"  {_('copia de OpenCode 1 borrada:')} {len(dropped)} {_('sesiones')}")
+            if kept:
+                print(f"  {len(kept)} {_('se conservan (tienen piezas solo en la copia vieja):')}")
+                for sess in kept[:10]:
+                    print(f"    {sess}")
+        elif drop_v1_copy and layout["v2"] and layout["v1"] and not imported:
+            print(f"  {_('OpenCode 2 no ha terminado de importar las sesiones de OpenCode 1; no se toca su copia.')}")
+        elif drop_v1_copy:
+            print(f"  {_('--drop-v1-copy: esta base no tiene copia de OpenCode 1 junto a tablas de OpenCode 2.')}")
         con.commit()
         print(f"  {_('VACUUM (puede tardar)...')}")
         cur.execute("VACUUM")
@@ -1554,6 +1728,7 @@ def prune_opencode_db(backup_dir=None, no_backup=False, close_opencode=False):
     entry = change_entry("opencode", "prune_database", db,
                          max(0, size_before - size_after),
                          redundant_events=red[0], messages=pruned_messages,
+                         v1_copy_sessions=len(dropped),
                          backup_path=str(backup_path) if backup_path else None,
                          integrity=ok)
     write_manifest([entry])
@@ -1791,6 +1966,9 @@ def main(argv=None):
                     help="aplicar apply-db sin respaldo de la DB (asumir el riesgo)")
     ap.add_argument("--close-opencode", action="store_true",
                     help="avisar y cerrar OpenCode si bloquea apply-db (nunca cierra el host actual)")
+    ap.add_argument("--drop-v1-copy", action="store_true",
+                    help="OpenCode 2: en apply-db, borrar la copia de OpenCode 1 de las "
+                         "sesiones que ya están completas en OpenCode 2")
     ap.add_argument("--no-antigravity-steps", action="store_true",
                     help="no podar los pasos pre-compactación en las DB de Antigravity")
     ap.add_argument("--only", default=None,
@@ -1831,7 +2009,8 @@ def main(argv=None):
     elif args.mode == "apply":
         return apply(args)
     elif args.mode == "apply-db":
-        return prune_opencode_db(args.backup_dir, args.no_backup, args.close_opencode)
+        return prune_opencode_db(args.backup_dir, args.no_backup, args.close_opencode,
+                                 args.drop_v1_copy)
     elif args.mode == "restore":
         restore(args.backup_dir or str(HOME / "respaldos-ia"))
         return 0
