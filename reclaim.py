@@ -44,7 +44,7 @@ from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home()
-VERSION = "3.6.1"
+VERSION = "3.7.0"
 MANIFEST_DIR = HOME / ".conversation-reclaim"
 TRANSIENT_MEDIA_MIN_AGE = 7 * 24 * 60 * 60
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
