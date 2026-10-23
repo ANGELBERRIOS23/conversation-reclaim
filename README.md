@@ -97,6 +97,9 @@ python3 reclaim.py apply --only images --trash        # images inside old Claude
 python3 reclaim.py apply --only codex-work --trash    # screenshots and drafts in Codex work/ folders
 python3 reclaim.py apply --only old-versions --trash  # old Claude Code / Codex versions and leftovers
 python3 reclaim.py apply --extras --older-than 30     # all extras, only what hasn't changed in 30 days
+python3 reclaim.py outputs                    # Codex outputs biggest first; flags copies and v1/v2 versions
+python3 reclaim.py outputs --to-trash 3 7 12  # move only the numbers you choose to the Trash
+python3 reclaim.py outputs --external /Volumes/DISK  # also look for copies on an external disk
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO   # prune opencode.db (opencode closed, backup required or --no-backup)
 python3 reclaim.py apply-db --no-backup --close-opencode  # warn, quit OpenCode normally, then prune
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO --drop-v1-copy  # OpenCode 2: also drop the leftover OpenCode 1 copy
@@ -201,6 +204,11 @@ Two more differences with OpenCode 2:
   default category; regenerable cache files remain eligible. Only the
   optional **conversation images** extra rewrites a rollout, and it keeps
   `session_meta`, line order, and every line without images untouched.
+- `outputs` never deletes anything by itself: it lists what Codex delivered
+  (`~/Documents/Codex/*/*/outputs`) from biggest to smallest, marks files that
+  already have an identical copy outside `~/Documents/Codex` and older `v1`/`v2`
+  versions, and moves to the Trash only what you pick. The app has the same
+  list in its **Large files** page.
 - Extras are **off by default** and only touch what hasn't changed in N
   days (`--older-than`, default 14; the app has the same setting). With
   `--trash` everything goes to the Trash, including the original of every

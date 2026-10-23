@@ -2251,9 +2251,7 @@ def codex_generated_duplicates(min_age_days, search_roots=None, reference_time=N
     if search_roots is None:
         # Todas las carpetas visibles del usuario (proyectos incluidos), sin
         # seguir enlaces: así no se bajan archivos de la nube por accidente.
-        search_roots = [p for p in HOME.iterdir()
-                        if p.is_dir() and not p.is_symlink() and not p.name.startswith(".")
-                        and p.name not in DUPLICATE_SEARCH_SKIP | {"Applications"}]
+        search_roots = user_search_roots()
     hashes = {}
     found = {}
     workspace = PATHS["codex_workspace"]
@@ -2513,6 +2511,184 @@ def apply_extras(kinds, min_age_days, trash=None):
     return freed, entries
 
 
+# ---------------------------------------------------------------------------
+# Outputs de Codex: lista del más pesado al más liviano. No borra nada solo;
+# cada persona elige qué mandar a la Papelera.
+# ---------------------------------------------------------------------------
+
+OUTPUTS_MIN_BYTES = 1024 * 1024
+# Solo una marca explícita de versión: 'video_v2' y 'video-v3' son familia.
+# Números sueltos o '(2)' no cuentan: suelen ser series o archivos distintos.
+_VERSION_TAIL = re.compile(r"[ _.-]*v(\d+)$", re.I)
+
+
+def _version_family(path):
+    """(carpeta, nombre sin la versión, extensión), o None si no dice versión."""
+    if not _VERSION_TAIL.search(path.stem):
+        return None
+    return (path.parent, _VERSION_TAIL.sub("", path.stem).lower(), path.suffix.lower())
+
+
+def find_identical_copies(originals, search_roots, skip_dir=None):
+    """{original: copia} para los archivos que tienen una copia idéntica.
+
+    Solo compara archivos del mismo tamaño y no sigue enlaces (así no baja
+    archivos de la nube). `skip_dir(ruta)` permite saltar carpetas.
+    """
+    by_size = defaultdict(list)
+    for path in originals:
+        try:
+            by_size[Path(path).lstat().st_size].append(Path(path))
+        except OSError:
+            continue
+    originals_set = {p for group in by_size.values() for p in group}
+    hashes = {}
+    found = {}
+    for root in search_roots:
+        if not Path(root).is_dir():
+            continue
+        for current, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in DUPLICATE_SEARCH_SKIP]
+            if skip_dir is not None and skip_dir(Path(current)):
+                dirs[:] = []
+                continue
+            for name in files:
+                copy = Path(current) / name
+                if copy in originals_set:
+                    continue
+                try:
+                    st = copy.lstat()
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode) or st.st_size not in by_size:
+                    continue
+                pending = [o for o in by_size[st.st_size] if o not in found]
+                if not pending:
+                    continue
+                try:
+                    copy_hash = _sha256(copy)
+                    for original in pending:
+                        if original not in hashes:
+                            hashes[original] = _sha256(original)
+                        if hashes[original] == copy_hash:
+                            found[original] = copy
+                except OSError:
+                    continue
+    return found
+
+
+def user_search_roots(extra=()):
+    roots = [p for p in HOME.iterdir()
+             if p.is_dir() and not p.is_symlink() and not p.name.startswith(".")
+             and p.name not in DUPLICATE_SEARCH_SKIP | {"Applications"}]
+    return roots + [Path(p) for p in extra]
+
+
+def codex_outputs(min_bytes=None, find_copies=True, extra_roots=()):
+    """Archivos de outputs/ de Codex, del más pesado al más liviano.
+
+    Cada uno dice si ya hay una copia idéntica fuera de ~/Documents/Codex y
+    si en la misma carpeta hay una versión más nueva del mismo archivo.
+    """
+    if min_bytes is None:
+        min_bytes = OUTPUTS_MIN_BYTES
+    workspace = PATHS["codex_workspace"]
+    items = []
+    for outputs in sorted(workspace.glob("*/*/outputs")):
+        if not outputs.is_dir() or outputs.is_symlink():
+            continue
+        for current, dirs, files in os.walk(outputs):
+            for name in files:
+                path = Path(current) / name
+                try:
+                    st = path.lstat()
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode) and st.st_size >= min_bytes:
+                    items.append({"path": path, "size": st.st_size, "mtime": st.st_mtime,
+                                  "task": "/".join(path.relative_to(workspace).parts[:2]),
+                                  "copy": None, "newer": None})
+    families = defaultdict(list)
+    for item in items:
+        family = _version_family(item["path"])
+        if family is not None:
+            families[family].append(item)
+    for group in families.values():
+        if len(group) > 1:
+            newest = max(group, key=lambda i: _version_key(_VERSION_TAIL.search(i["path"].stem).group(1)))
+            for item in group:
+                if item is not newest:
+                    item["newer"] = newest["path"]
+    if find_copies and items:
+        copies = find_identical_copies(
+            [i["path"] for i in items], user_search_roots(extra_roots),
+            skip_dir=lambda d: d == workspace or workspace in d.parents)
+        for item in items:
+            item["copy"] = copies.get(item["path"])
+    items.sort(key=lambda i: (-i["size"], str(i["path"])))
+    return items
+
+
+def print_outputs(items, limit):
+    workspace = PATHS["codex_workspace"]
+    total = sum(i["size"] for i in items)
+    print(f"Outputs de Codex de {human(OUTPUTS_MIN_BYTES)} o más: {len(items)} archivos, {human(total)}")
+    with_copy = [i for i in items if i["copy"]]
+    older = [i for i in items if i["newer"] and not i["copy"]]
+    print(f"  con copia idéntica en otra carpeta: {len(with_copy)} ({human(sum(i['size'] for i in with_copy))})")
+    print(f"  con una versión más nueva al lado: {len(older)} ({human(sum(i['size'] for i in older))})")
+    print("  Nada se borra solo. Para mandar a la Papelera: reclaim.py outputs --to-trash <número> ...")
+    print()
+    for number, item in enumerate(items[:limit], 1):
+        note = ""
+        if item["copy"]:
+            note = f"  [copia en {str(item['copy']).replace(str(HOME), '~')}]"
+        elif item["newer"]:
+            note = f"  [hay versión más nueva: {item['newer'].name}]"
+        date = datetime.fromtimestamp(item["mtime"]).strftime("%Y-%m-%d")
+        print(f"{number:>4}. {human(item['size']):>9}  {date}  "
+              f"{item['path'].relative_to(workspace)}{note}")
+    if len(items) > limit:
+        print(f"  … y {len(items) - limit} más (usa --limit)")
+
+
+def trash_outputs(items, choices):
+    """Manda a la Papelera los outputs elegidos por número o por ruta."""
+    trash = trash_root()
+    if trash is None:
+        print("  REFUSED: este sistema no tiene Papelera conocida.")
+        return 4
+    workspace = PATHS["codex_workspace"]
+    chosen = []
+    for choice in choices:
+        if choice.isdigit():
+            index = int(choice) - 1
+            if not 0 <= index < len(items):
+                print(f"  REFUSED: el número {choice} no está en la lista.")
+                return 2
+            chosen.append(items[index]["path"])
+        else:
+            path = Path(choice).expanduser().resolve()
+            if not any(path == i["path"].resolve() for i in items):
+                print(f"  REFUSED: {choice} no es un output de Codex de la lista.")
+                return 2
+            chosen.append(path)
+    trash.mkdir(parents=True, exist_ok=True)
+    entries = []
+    freed = 0
+    for path in dict.fromkeys(chosen):
+        if not str(path.resolve()).startswith(str(workspace.resolve())):
+            continue
+        size = discard(path, trash)
+        freed += size
+        entries.append(change_entry("codex", "trash_output", path, size, trash=str(trash)))
+        print(f"  a la Papelera: {path.relative_to(workspace)} ({human(size)})")
+    if entries:
+        write_manifest(entries)
+    print(f"  Total: {human(freed)} en {trash}")
+    return 0
+
+
 def apply(args):
     manifest = []
     dest = None
@@ -2612,7 +2788,15 @@ def restore(backup_dir):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="conversation-reclaim v" + VERSION)
     ap.add_argument("mode", nargs="?", default="scan",
-                    choices=["scan", "apply", "apply-db", "restore", "skills"])
+                    choices=["scan", "apply", "apply-db", "restore", "skills", "outputs"])
+    ap.add_argument("--limit", type=int, default=40,
+                    help="outputs: cuántos archivos mostrar (por defecto 40)")
+    ap.add_argument("--external", action="append", default=[], metavar="CARPETA",
+                    help="outputs: buscar copias también en esta carpeta (por ejemplo un disco externo)")
+    ap.add_argument("--no-copies", action="store_true",
+                    help="outputs: no buscar copias (más rápido)")
+    ap.add_argument("--to-trash", nargs="+", dest="trash_items", default=[], metavar="N",
+                    help="outputs: mandar a la Papelera estos números de la lista (o rutas)")
     ap.add_argument("--backup-dir", default=None,
                     help="destino del respaldo completo (opcional; disco externo recomendado)")
     ap.add_argument("--no-backup", action="store_true",
@@ -2651,6 +2835,12 @@ def main(argv=None):
         scan()
         if args.extras:
             print_extras(args.older_than)
+        return 0
+    elif args.mode == "outputs":
+        items = codex_outputs(find_copies=not args.no_copies, extra_roots=args.external)
+        if args.trash_items:
+            return trash_outputs(items, args.trash_items)
+        print_outputs(items, args.limit)
         return 0
     elif args.mode == "skills":
         sk = scan_skills()

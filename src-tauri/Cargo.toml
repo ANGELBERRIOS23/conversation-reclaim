@@ -20,6 +20,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 tauri = { version = "2", features = [] }
 tempfile = "3"
 walkdir = "2"
+trash = "5"
 zstd = "0.13"
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]

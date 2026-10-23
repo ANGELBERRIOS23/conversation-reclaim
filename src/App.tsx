@@ -2,14 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Check, ChevronDown, CircleHelp, ExternalLink,
-  FileClock, Globe2, HardDrive, Info, Languages,
+  FileClock, FolderSearch, Globe2, HardDrive, Info, Languages,
   LoaderCircle, LockKeyhole, RefreshCw, ShieldCheck, Sparkles, Trash2,
 } from "lucide-react";
 import { BrandLogo } from "./BrandLogos";
 
 type Language = "es" | "en";
 type CategoryKey = string;
-type Page = "overview" | "activity" | "protection";
+type Page = "overview" | "outputs" | "activity" | "protection";
 
 type Category = {
   key: CategoryKey;
@@ -40,6 +40,23 @@ type ApplyResult = {
   applied: number;
   skipped: number;
   warnings: string[];
+};
+
+type OutputItem = {
+  path: string;
+  name: string;
+  task: string;
+  bytes: number;
+  modified: string;
+  copyPath: string | null;
+  newerVersion: string | null;
+};
+
+type TrashResult = {
+  moved: number;
+  freedBytes: number;
+  manifestPath: string;
+  errors: string[];
 };
 
 type UpdateInfo = {
@@ -125,6 +142,25 @@ const copy = {
     ageLabel: "Solo lo que no cambió en",
     ageUnit: "días",
     ageHelp: "Aplica a imágenes, archivos de trabajo y restos. Vuelve a analizar después de cambiarlo.",
+    navOutputs: "Archivos grandes",
+    outputsTitle: "Outputs de Codex",
+    outputsBody: "Lo que Codex te entregó, del más pesado al más liviano. Nada se borra solo: marca lo que ya no necesitas y mándalo a la Papelera.",
+    findOutputs: "Buscar archivos",
+    searching: "Buscando…",
+    outputsHint: "Busca en ~/Documents/Codex y revisa si ya tienes una copia idéntica en tus carpetas. Puede tardar un poco.",
+    outputsEmpty: "No hay outputs de 1 MB o más.",
+    outputsFound: "archivos",
+    withCopyCount: "con copia en otra carpeta",
+    copyAt: "Copia en",
+    newerVersion: "Hay versión más nueva",
+    selectWithCopy: "Marcar los que tienen copia",
+    clearSelection: "Quitar selección",
+    moveToTrash: "Mover a la Papelera",
+    moving: "Moviendo…",
+    trashConfirmTitle: "¿Mover a la Papelera?",
+    trashConfirmBody: "Los archivos marcados van a la Papelera. Puedes sacarlos de ahí hasta que la vacíes.",
+    trashDone: "en la Papelera",
+    trashErrors: "no se pudieron mover",
   },
   en: {
     product: "Conversation Reclaim",
@@ -202,6 +238,25 @@ const copy = {
     ageLabel: "Only what hasn't changed in",
     ageUnit: "days",
     ageHelp: "Applies to images, work files, and leftovers. Scan again after changing it.",
+    navOutputs: "Large files",
+    outputsTitle: "Codex outputs",
+    outputsBody: "What Codex delivered to you, biggest first. Nothing is deleted on its own: check what you no longer need and move it to the Trash.",
+    findOutputs: "Find files",
+    searching: "Searching…",
+    outputsHint: "Looks in ~/Documents/Codex and checks whether an identical copy already exists in your folders. It may take a moment.",
+    outputsEmpty: "No outputs of 1 MB or more.",
+    outputsFound: "files",
+    withCopyCount: "with a copy elsewhere",
+    copyAt: "Copy at",
+    newerVersion: "Newer version available",
+    selectWithCopy: "Select the ones with a copy",
+    clearSelection: "Clear selection",
+    moveToTrash: "Move to Trash",
+    moving: "Moving…",
+    trashConfirmTitle: "Move to Trash?",
+    trashConfirmBody: "The selected files go to the Trash. You can take them back until you empty it.",
+    trashDone: "in the Trash",
+    trashErrors: "could not be moved",
   },
 };
 
@@ -239,6 +294,12 @@ function isTauri() {
   return "__TAURI_INTERNALS__" in window;
 }
 
+const demoOutputs: OutputItem[] = [
+  { path: "/demo/Documents/Codex/2026-10-06/mira/outputs/Audio 19 - cruce.wav", name: "Audio 19 - cruce.wav", task: "2026-10-06/mira", bytes: 301_056_000, modified: "2026-10-06", copyPath: null, newerVersion: null },
+  { path: "/demo/Documents/Codex/2026-10-06/mira/outputs/C0027 - color y ruido.mov", name: "C0027 - color y ruido.mov", task: "2026-10-06/mira", bytes: 200_015_872, modified: "2026-10-06", copyPath: "/demo/Movies/C0027 - color y ruido.mov", newerVersion: null },
+  { path: "/demo/Documents/Codex/2026-09-02/q/outputs/Marketing_v1.zip", name: "Marketing_v1.zip", task: "2026-09-02/q", bytes: 147_324_928, modified: "2026-09-02", copyPath: null, newerVersion: "Marketing_v2.zip" },
+];
+
 const DEFAULT_AGE_DAYS = 14;
 
 function savedAgeDays() {
@@ -271,6 +332,11 @@ export default function App() {
   const [availableUpdate, setAvailableUpdate] = useState<UpdateInfo | null>(null);
   const [updateError, setUpdateError] = useState("");
   const [ageDays, setAgeDays] = useState(savedAgeDays);
+  const [outputs, setOutputs] = useState<OutputItem[] | null>(null);
+  const [outputsBusy, setOutputsBusy] = useState<"search" | "trash" | null>(null);
+  const [pickedOutputs, setPickedOutputs] = useState<Set<string>>(new Set());
+  const [trashModal, setTrashModal] = useState<"confirm" | "done" | null>(null);
+  const [trashResult, setTrashResult] = useState<TrashResult | null>(null);
   const t = copy[lang];
   const nameOf = (category: Category) => translatedNames[category.key] ? t[translatedNames[category.key]] : category.name;
 
@@ -366,6 +432,45 @@ export default function App() {
     });
   };
 
+  const findOutputs = async () => {
+    setOutputsBusy("search");
+    try {
+      const items = isTauri() ? await invoke<OutputItem[]>("list_large_outputs") : demoOutputs;
+      setOutputs(items);
+      setPickedOutputs((previous) => new Set([...previous].filter((path) => items.some((item) => item.path === path))));
+    } catch (cause) {
+      setError(String(cause));
+      setModal("error");
+    } finally {
+      setOutputsBusy(null);
+    }
+  };
+
+  const togglePicked = (path: string) => setPickedOutputs((previous) => {
+    const next = new Set(previous);
+    if (next.has(path)) next.delete(path); else next.add(path);
+    return next;
+  });
+
+  const pickedBytes = (outputs ?? []).filter((item) => pickedOutputs.has(item.path)).reduce((sum, item) => sum + item.bytes, 0);
+
+  const moveOutputsToTrash = async () => {
+    setTrashModal(null);
+    setOutputsBusy("trash");
+    try {
+      const response = await invoke<TrashResult>("trash_outputs", { paths: [...pickedOutputs] });
+      setTrashResult(response);
+      setPickedOutputs(new Set());
+      setTrashModal("done");
+    } catch (cause) {
+      setError(String(cause));
+      setModal("error");
+    } finally {
+      setOutputsBusy(null);
+    }
+    await findOutputs();
+  };
+
   const clean = async () => {
     setModal(null);
     setBusy("clean");
@@ -388,6 +493,7 @@ export default function App() {
         <div className="brand" data-tauri-drag-region><span className="brand-mark"><Sparkles size={18} /></span><span>{t.product}</span></div>
         <nav aria-label="Primary">
           <button className={`nav-item ${page === "overview" ? "active" : ""}`} onClick={() => setPage("overview")}><HardDrive size={18} />{t.navOverview}</button>
+          <button className={`nav-item ${page === "outputs" ? "active" : ""}`} onClick={() => setPage("outputs")}><FolderSearch size={18} />{t.navOutputs}</button>
           <button className={`nav-item ${page === "activity" ? "active" : ""}`} onClick={() => setPage("activity")}><FileClock size={18} />{t.navActivity}</button>
           <button className={`nav-item ${page === "protection" ? "active" : ""}`} onClick={() => setPage("protection")}><ShieldCheck size={18} />{t.navSafety}</button>
         </nav>
@@ -411,6 +517,7 @@ export default function App() {
           <div className="brand" data-tauri-drag-region><span className="brand-mark"><Sparkles size={17} /></span><span>{t.product}</span></div>
           <div className="mobile-actions">
             <button className={`mobile-nav ${page === "overview" ? "active" : ""}`} onClick={() => setPage("overview")} aria-label={t.navOverview}><HardDrive size={17} /></button>
+            <button className={`mobile-nav ${page === "outputs" ? "active" : ""}`} onClick={() => setPage("outputs")} aria-label={t.navOutputs}><FolderSearch size={17} /></button>
             <button className={`mobile-nav ${page === "activity" ? "active" : ""}`} onClick={() => setPage("activity")} aria-label={t.navActivity}><FileClock size={17} /></button>
             <button className={`mobile-nav ${page === "protection" ? "active" : ""}`} onClick={() => setPage("protection")} aria-label={t.navSafety}><ShieldCheck size={17} /></button>
             <button className="language-compact" onClick={() => changeLanguage(lang === "es" ? "en" : "es")}><Globe2 size={17} />{lang.toUpperCase()}</button>
@@ -470,6 +577,36 @@ export default function App() {
           <footer className="action-bar"><div><span>{selected.size} {t.items}</span><strong>{formatBytes(selectedBytes)}</strong></div><button className="primary-button" disabled={!selected.size || busy !== null || !isTauri()} onClick={() => setModal("confirm")}><Sparkles size={17} />{busy === "clean" ? t.cleaning : t.clean}</button></footer>
         </>}
 
+        {page === "outputs" && <>
+          <div className="content page-content">
+            <section className="page-intro"><span className="eyebrow"><FolderSearch size={14} />{t.navOutputs}</span><h1>{t.outputsTitle}</h1><p>{t.outputsBody}</p></section>
+            <section className="section-heading">
+              <div><p>{outputs ? `${outputs.length} ${t.outputsFound} · ${formatBytes(outputs.reduce((sum, item) => sum + item.bytes, 0))} · ${outputs.filter((item) => item.copyPath).length} ${t.withCopyCount}` : t.outputsHint}</p></div>
+              <div className="heading-actions">
+                {outputs && outputs.some((item) => item.copyPath) && <button className="secondary-button" onClick={() => setPickedOutputs(new Set(outputs.filter((item) => item.copyPath).map((item) => item.path)))} disabled={outputsBusy !== null}>{t.selectWithCopy}</button>}
+                {pickedOutputs.size > 0 && <button className="secondary-button" onClick={() => setPickedOutputs(new Set())} disabled={outputsBusy !== null}>{t.clearSelection}</button>}
+                <button className="secondary-button scan-button" onClick={findOutputs} disabled={outputsBusy !== null}><RefreshCw size={16} className={outputsBusy === "search" ? "spin" : ""} />{outputsBusy === "search" ? t.searching : t.findOutputs}</button>
+              </div>
+            </section>
+            {outputs && outputs.length === 0 && <p className="empty-note">{t.outputsEmpty}</p>}
+            {outputs && outputs.length > 0 && <ul className="output-list">
+              {outputs.map((item) => {
+                const picked = pickedOutputs.has(item.path);
+                return <li key={item.path}>
+                  <label className={`output-row ${picked ? "picked" : ""}`}>
+                    <input type="checkbox" checked={picked} onChange={() => togglePicked(item.path)} disabled={outputsBusy !== null} />
+                    <strong className="output-size">{formatBytes(item.bytes)}</strong>
+                    <span className="output-main"><span className="output-name" title={item.path}>{item.name}</span><small>{item.task} · {item.modified}</small></span>
+                    {item.copyPath && <span className="output-badge copy" title={item.copyPath}>{t.copyAt} {item.copyPath.split(/[\\/]/).slice(-2).join("/")}</span>}
+                    {!item.copyPath && item.newerVersion && <span className="output-badge newer" title={item.newerVersion}>{t.newerVersion}: {item.newerVersion}</span>}
+                  </label>
+                </li>;
+              })}
+            </ul>}
+          </div>
+          <footer className="action-bar"><div><span>{pickedOutputs.size} {t.items}</span><strong>{formatBytes(pickedBytes)}</strong></div><button className="primary-button" disabled={!pickedOutputs.size || outputsBusy !== null || !isTauri()} onClick={() => setTrashModal("confirm")}><Trash2 size={17} />{outputsBusy === "trash" ? t.moving : t.moveToTrash}</button></footer>
+        </>}
+
         {page === "activity" && <div className="content page-content">
           <section className="page-intro"><span className="eyebrow"><FileClock size={14} />{t.navActivity}</span><h1>{t.activityTitle}</h1><p>{t.activityBody}</p></section>
           <section className="status-grid">
@@ -492,6 +629,16 @@ export default function App() {
           </section>
         </div>}
       </main>
+
+      {trashModal && <div className="modal-backdrop" role="presentation" onMouseDown={() => setTrashModal(null)}><section className="modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+        <span className={`modal-icon ${trashModal === "done" ? "success" : "confirm"}`}>{trashModal === "done" ? <Check size={28} /> : <Trash2 size={27} />}</span>
+        <h2>{trashModal === "confirm" ? t.trashConfirmTitle : `${trashResult?.moved ?? 0} ${t.outputsFound} ${t.trashDone}`}</h2>
+        <p>{trashModal === "confirm" ? t.trashConfirmBody : `${formatBytes(trashResult?.freedBytes ?? 0)}${trashResult?.errors.length ? ` · ${trashResult.errors.length} ${t.trashErrors}` : ""}`}</p>
+        {trashModal === "confirm" && <div className="confirm-total"><span>{pickedOutputs.size} {t.items}</span><strong>{formatBytes(pickedBytes)}</strong></div>}
+        <div className="modal-actions">
+          {trashModal === "confirm" ? <><button className="secondary-button" onClick={() => setTrashModal(null)}>{t.cancel}</button><button className="primary-button" onClick={moveOutputsToTrash}><Trash2 size={16} />{t.moveToTrash}</button></> : <button className="primary-button" onClick={() => setTrashModal(null)}>{t.close}</button>}
+        </div>
+      </section></div>}
 
       {modal && <div className="modal-backdrop" role="presentation" onMouseDown={() => busy === null && setModal(null)}><section className="modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
         <span className={`modal-icon ${modal}`}>{modal === "success" ? resultKind === "complete" ? <Check size={28} /> : <Info size={28} /> : modal === "error" ? <Info size={28} /> : <Trash2 size={27} />}</span>

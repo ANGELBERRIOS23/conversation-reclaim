@@ -819,5 +819,77 @@ class ExtrasFilesTests(unittest.TestCase):
                          "delete_work_media")
 
 
+class OutputsListTests(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.root = Path(self.td.name)
+        self.ws = self.root / "Documents" / "Codex"
+        self.paths = dict(reclaim.PATHS)
+        self.paths["codex_workspace"] = self.ws
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def make(self, relative, size, fill=b"x"):
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(fill * size)
+        return path
+
+    def listing(self, **kwargs):
+        with mock.patch.object(reclaim, "PATHS", self.paths), \
+             mock.patch.object(reclaim, "HOME", self.root), \
+             mock.patch.object(reclaim, "OUTPUTS_MIN_BYTES", 10):
+            return reclaim.codex_outputs(**kwargs)
+
+    def test_lists_outputs_biggest_first_and_skips_work_and_small_files(self):
+        big = self.make("Documents/Codex/d/t/outputs/video.mp4", 300)
+        mid = self.make("Documents/Codex/d/t/outputs/sub/foto.png", 200)
+        self.make("Documents/Codex/d/t/outputs/nota.txt", 5)
+        self.make("Documents/Codex/d/t/work/borrador.mp4", 900)
+        items = self.listing(find_copies=False)
+        self.assertEqual([i["path"] for i in items], [big, mid])
+        self.assertEqual(items[0]["task"], "d/t")
+
+    def test_marks_copies_outside_codex_but_not_inside(self):
+        shared = self.make("Documents/Codex/d/t/outputs/a.mp4", 100, b"a")
+        only_codex = self.make("Documents/Codex/d/t/outputs/b.mp4", 100, b"b")
+        copy = self.make("Downloads/a.mp4", 100, b"a")
+        self.make("Documents/Codex/d/otra/outputs/b-copia.mp4", 100, b"b")
+        items = {i["path"]: i for i in self.listing()}
+        self.assertEqual(items[shared]["copy"], copy)
+        self.assertIsNone(items[only_codex]["copy"])
+
+    def test_only_explicit_v_numbers_count_as_versions(self):
+        v1 = self.make("Documents/Codex/d/t/outputs/spot_v1.mp4", 100)
+        v2 = self.make("Documents/Codex/d/t/outputs/spot_v2.mp4", 100)
+        series = self.make("Documents/Codex/d/t/outputs/Audio 03.wav", 100)
+        self.make("Documents/Codex/d/t/outputs/Audio 04.wav", 100)
+        unnamed = self.make("Documents/Codex/d/t/outputs/File-unnamed (1).png", 100)
+        self.make("Documents/Codex/d/t/outputs/File-unnamed (2).png", 100)
+        items = {i["path"]: i for i in self.listing(find_copies=False)}
+        self.assertEqual(items[v1]["newer"], v2)
+        self.assertIsNone(items[v2]["newer"])
+        self.assertIsNone(items[series]["newer"])
+        self.assertIsNone(items[unnamed]["newer"])
+
+    def test_trash_by_number_moves_only_the_chosen_file(self):
+        big = self.make("Documents/Codex/d/t/outputs/video.mp4", 300)
+        small = self.make("Documents/Codex/d/t/outputs/foto.png", 200)
+        items = self.listing(find_copies=False)
+        trash = self.root / ".Trash" / "reclaim"
+        with mock.patch.object(reclaim, "PATHS", self.paths), \
+             mock.patch.object(reclaim, "HOME", self.root), \
+             mock.patch.object(reclaim, "trash_root", return_value=trash), \
+             mock.patch.object(reclaim, "MANIFEST_DIR", self.root / "manifests"), \
+             redirect_stdout(io.StringIO()):
+            self.assertEqual(reclaim.trash_outputs(items, ["1"]), 0)
+            self.assertEqual(reclaim.trash_outputs(items, ["9"]), 2)
+            self.assertEqual(reclaim.trash_outputs(items, [str(self.root / "otro.mp4")]), 2)
+        self.assertFalse(big.exists())
+        self.assertTrue(small.exists())
+        self.assertTrue((trash / "Documents/Codex/d/t/outputs/video.mp4").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

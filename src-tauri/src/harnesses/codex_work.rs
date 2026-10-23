@@ -71,64 +71,89 @@ pub(crate) fn work_media(workspace: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// Imágenes generadas por Codex que ya tienen una copia idéntica guardada en
-/// las carpetas del usuario. Las copias dentro de `work/` no cuentan porque
-/// también se limpian.
-pub(crate) fn generated_duplicates(generated: &Path, search_roots: &[PathBuf], workspace: &Path) -> Vec<(PathBuf, PathBuf)> {
-    let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    for entry in WalkDir::new(generated).follow_links(false).into_iter().filter_map(Result::ok) {
-        let path = entry.path();
-        let size = file_size(path);
-        if entry.file_type().is_file() && size > 0 && is_older_than_cutoff(path) {
-            by_size.entry(size).or_default().push(path.to_path_buf());
+fn same_contents(a: &Path, b: &Path) -> bool {
+    use std::io::Read;
+    let (Ok(mut fa), Ok(mut fb)) = (fs::File::open(a), fs::File::open(b)) else {
+        return false;
+    };
+    let mut ba = vec![0u8; 1 << 20];
+    let mut bb = vec![0u8; 1 << 20];
+    loop {
+        let (Ok(na), Ok(nb)) = (fa.read(&mut ba), fb.read(&mut bb)) else {
+            return false;
+        };
+        if na != nb || ba[..na] != bb[..nb] {
+            return false;
+        }
+        if na == 0 {
+            return true;
         }
     }
-    let mut contents: HashMap<PathBuf, Vec<u8>> = HashMap::new();
-    let mut found: HashMap<PathBuf, PathBuf> = HashMap::new();
-    if by_size.is_empty() {
-        return Vec::new();
+}
+
+/// {original: copia} para los originales que tienen una copia idéntica en
+/// `roots`. Solo compara archivos del mismo tamaño y no sigue enlaces (así no
+/// baja archivos de la nube). `skip_dir` permite saltar carpetas enteras.
+pub(crate) fn identical_copies(
+    originals: &[PathBuf],
+    roots: &[PathBuf],
+    skip_dir: &dyn Fn(&Path) -> bool,
+) -> HashMap<PathBuf, PathBuf> {
+    let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+    for path in originals {
+        by_size.entry(file_size(path)).or_default().push(path.clone());
     }
-    for root in search_roots {
+    let mut found: HashMap<PathBuf, PathBuf> = HashMap::new();
+    for root in roots {
         let walker = WalkDir::new(root).follow_links(false).into_iter();
         for entry in walker
             .filter_entry(|e| {
                 !(e.file_type().is_dir()
-                    && (SKIP_DIRS.iter().any(|skip| e.file_name() == *skip) || is_work_dir(e.path(), workspace)))
+                    && (SKIP_DIRS.iter().any(|skip| e.file_name() == *skip) || skip_dir(e.path())))
             })
             .filter_map(Result::ok)
         {
             if !entry.file_type().is_file() {
                 continue;
             }
-            let Some(originals) = by_size.get(&file_size(entry.path())) else {
+            let Some(candidates) = by_size.get(&file_size(entry.path())) else {
                 continue;
             };
-            let pending: Vec<_> = originals.iter().filter(|o| !found.contains_key(*o)).collect();
-            if pending.is_empty() {
-                continue;
-            }
-            let Ok(copy) = fs::read(entry.path()) else {
-                continue;
-            };
-            for original in pending {
-                if !contents.contains_key(original) {
-                    let Ok(bytes) = fs::read(original) else {
-                        continue;
-                    };
-                    contents.insert(original.clone(), bytes);
-                }
-                if contents.get(original) == Some(&copy) {
+            for original in candidates {
+                if original.as_path() != entry.path()
+                    && !found.contains_key(original)
+                    && same_contents(original, entry.path())
+                {
                     found.insert(original.clone(), entry.path().to_path_buf());
                 }
             }
         }
     }
-    let mut pairs: Vec<_> = found.into_iter().collect();
+    found
+}
+
+/// Imágenes generadas por Codex que ya tienen una copia idéntica guardada en
+/// las carpetas del usuario. Las copias dentro de `work/` no cuentan porque
+/// también se limpian.
+pub(crate) fn generated_duplicates(generated: &Path, search_roots: &[PathBuf], workspace: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let originals: Vec<PathBuf> = WalkDir::new(generated)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file() && file_size(e.path()) > 0 && is_older_than_cutoff(e.path()))
+        .map(|e| e.into_path())
+        .collect();
+    if originals.is_empty() {
+        return Vec::new();
+    }
+    let mut pairs: Vec<_> = identical_copies(&originals, search_roots, &|dir| is_work_dir(dir, workspace))
+        .into_iter()
+        .collect();
     pairs.sort();
     pairs
 }
 
-fn search_roots(home: &Path) -> Vec<PathBuf> {
+pub(crate) fn search_roots(home: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(home) else {
         return Vec::new();
     };

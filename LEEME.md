@@ -97,6 +97,9 @@ python3 reclaim.py apply --only images --trash        # imágenes dentro de chat
 python3 reclaim.py apply --only codex-work --trash    # capturas y borradores en las carpetas work/ de Codex
 python3 reclaim.py apply --only old-versions --trash  # versiones viejas de Claude Code / Codex y restos
 python3 reclaim.py apply --extras --older-than 30     # todos los extras, solo lo que no cambió en 30 días
+python3 reclaim.py outputs                    # outputs de Codex del más pesado al más liviano; marca copias y versiones v1/v2
+python3 reclaim.py outputs --to-trash 3 7 12  # manda a la Papelera solo los números que elijas
+python3 reclaim.py outputs --external /Volumes/DISCO  # busca copias también en un disco externo
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO   # poda opencode.db (opencode cerrado; respaldo obligatorio o --no-backup)
 python3 reclaim.py apply-db --no-backup --close-opencode  # avisa, cierra OpenCode normalmente y poda
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO --drop-v1-copy  # OpenCode 2: borra también la copia vieja de OpenCode 1
@@ -208,6 +211,11 @@ Otras dos diferencias con OpenCode 2:
   rollouts; solo sus cachés regenerables siguen siendo elegibles. Solo el
   extra opcional de **imágenes en conversaciones** reescribe un rollout, y
   conserva `session_meta`, el orden y todas las líneas sin imágenes.
+- `outputs` nunca borra nada por su cuenta: lista lo que Codex entregó
+  (`~/Documents/Codex/*/*/outputs`) del más pesado al más liviano, marca los
+  que ya tienen una copia idéntica fuera de `~/Documents/Codex` y las versiones
+  `v1`/`v2` viejas, y manda a la Papelera solo lo que elijas. La app tiene la
+  misma lista en la página **Archivos grandes**.
 - Los extras vienen **desmarcados** y solo tocan lo que no cambió en N días
   (`--older-than`, 14 por defecto; la app tiene el mismo ajuste). Con
   `--trash` todo va a la Papelera, incluido el original de cada chat que se

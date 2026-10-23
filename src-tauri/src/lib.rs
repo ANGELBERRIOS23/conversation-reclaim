@@ -1,5 +1,6 @@
 mod engine;
 mod harnesses;
+mod outputs;
 
 use engine::{ApplyRequest, ApplyResult, ScanResult};
 use serde::Serialize;
@@ -23,6 +24,20 @@ fn scan_storage(older_than_days: Option<u64>) -> Result<ScanResult, String> {
 #[tauri::command]
 fn apply_cleanup(request: ApplyRequest) -> Result<ApplyResult, String> {
     engine::apply_cleanup(request)
+}
+
+#[tauri::command]
+async fn list_large_outputs() -> Result<Vec<outputs::OutputItem>, String> {
+    tauri::async_runtime::spawn_blocking(outputs::list_large_outputs)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn trash_outputs(paths: Vec<String>) -> Result<outputs::TrashResult, String> {
+    tauri::async_runtime::spawn_blocking(move || outputs::trash_outputs(paths))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -78,6 +93,8 @@ pub fn run() {
             scan_storage,
             apply_cleanup,
             reveal_manifest,
+            list_large_outputs,
+            trash_outputs,
             check_for_update,
             install_update
         ])
