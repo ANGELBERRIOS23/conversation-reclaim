@@ -41,6 +41,20 @@ async fn trash_outputs(paths: Vec<String>) -> Result<outputs::TrashResult, Strin
 }
 
 #[tauri::command]
+async fn list_generated_images() -> Result<Vec<outputs::GeneratedImage>, String> {
+    tauri::async_runtime::spawn_blocking(outputs::list_generated_images)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn trash_generated_images(paths: Vec<String>) -> Result<outputs::TrashResult, String> {
+    tauri::async_runtime::spawn_blocking(move || outputs::trash_generated_images(paths))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn reveal_manifest(path: String) -> Result<(), String> {
     engine::reveal_manifest(&path)
 }
@@ -95,6 +109,8 @@ pub fn run() {
             reveal_manifest,
             list_large_outputs,
             trash_outputs,
+            list_generated_images,
+            trash_generated_images,
             check_for_update,
             install_update
         ])

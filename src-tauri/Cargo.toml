@@ -1,6 +1,6 @@
 [package]
 name = "conversation-reclaim"
-version = "3.8.0"
+version = "3.9.0"
 description = "Safely reclaim space used by AI conversation tools"
 authors = ["Angel Berrios <angel@aberrios.com>"]
 edition = "2021"
@@ -17,7 +17,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tempfile = "3"
 walkdir = "2"
 trash = "5"

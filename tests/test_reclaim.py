@@ -819,7 +819,7 @@ class ExtrasFilesTests(unittest.TestCase):
                          "delete_work_media")
 
 
-class OutputsListTests(unittest.TestCase):
+class OutputsFixture(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
         self.root = Path(self.td.name)
@@ -842,6 +842,8 @@ class OutputsListTests(unittest.TestCase):
              mock.patch.object(reclaim, "OUTPUTS_MIN_BYTES", 10):
             return reclaim.codex_outputs(**kwargs)
 
+
+class OutputsListTests(OutputsFixture):
     def test_lists_outputs_biggest_first_and_skips_work_and_small_files(self):
         big = self.make("Documents/Codex/d/t/outputs/video.mp4", 300)
         mid = self.make("Documents/Codex/d/t/outputs/sub/foto.png", 200)
@@ -889,6 +891,58 @@ class OutputsListTests(unittest.TestCase):
         self.assertFalse(big.exists())
         self.assertTrue(small.exists())
         self.assertTrue((trash / "Documents/Codex/d/t/outputs/video.mp4").exists())
+
+
+class GeneratedListTests(OutputsFixture):
+    def setUp(self):
+        super().setUp()
+        self.paths["codex_generated"] = self.root / ".codex" / "generated_images"
+        self.paths["codex_state"] = self.root / ".codex" / "state_5.sqlite"
+
+    def generated(self):
+        with mock.patch.object(reclaim, "PATHS", self.paths), \
+             mock.patch.object(reclaim, "HOME", self.root):
+            return reclaim.codex_generated_list()
+
+    def test_recommended_first_with_chat_title(self):
+        self.make(".codex/generated_images/chat-a/big.png", 300, b"a")
+        copied = self.make(".codex/generated_images/chat-b/copied.png", 100, b"b")
+        self.make("Downloads/logo.png", 100, b"b")
+        in_work = self.make(".codex/generated_images/chat-a/draft.png", 200, b"c")
+        self.make("Documents/Codex/d/t/work/draft.png", 200, b"c")
+        self.paths["codex_state"].parent.mkdir(parents=True, exist_ok=True)
+        with closing_db(self.paths["codex_state"]) as con:
+            con.execute("CREATE TABLE threads (id TEXT, title TEXT, name TEXT)")
+            con.execute("INSERT INTO threads VALUES ('chat-b', 'Logo para la web', NULL)")
+        items = self.generated()
+        self.assertEqual(items[0]["path"], copied)
+        self.assertEqual(items[0]["task"], "Logo para la web")
+        self.assertEqual(items[0]["copy"], self.root / "Downloads/logo.png")
+        self.assertIsNone(next(i for i in items if i["path"] == in_work)["copy"])
+
+    def test_trash_stays_inside_generated_images(self):
+        image = self.make(".codex/generated_images/chat/x.png", 50)
+        items = self.generated()
+        trash = self.root / ".Trash" / "reclaim"
+        with mock.patch.object(reclaim, "PATHS", self.paths), \
+             mock.patch.object(reclaim, "HOME", self.root), \
+             mock.patch.object(reclaim, "trash_root", return_value=trash), \
+             mock.patch.object(reclaim, "MANIFEST_DIR", self.root / "manifests"), \
+             redirect_stdout(io.StringIO()):
+            outside = str(self.make("Downloads/mine.png", 50))
+            self.assertEqual(reclaim.trash_outputs(items, [outside],
+                                                   root=self.paths["codex_generated"]), 2)
+            self.assertEqual(reclaim.trash_outputs(items, ["1"], root=self.paths["codex_generated"],
+                                                   action="trash_generated_image"), 0)
+        self.assertFalse(image.exists())
+        self.assertTrue((trash / ".codex/generated_images/chat/x.png").exists())
+
+
+def closing_db(path):
+    from contextlib import closing as _closing
+    con = sqlite3.connect(str(path))
+    con.isolation_level = None
+    return _closing(con)
 
 
 if __name__ == "__main__":

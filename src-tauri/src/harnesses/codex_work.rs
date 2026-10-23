@@ -25,7 +25,7 @@ fn has_files(dir: &Path) -> bool {
 }
 
 /// `<workspace>/<fecha>/<tarea>/work/...`
-fn is_work_dir(path: &Path, workspace: &Path) -> bool {
+pub(crate) fn is_work_dir(path: &Path, workspace: &Path) -> bool {
     path.strip_prefix(workspace)
         .map(|rest| rest.components().nth(2).is_some_and(|c| c.as_os_str() == "work"))
         .unwrap_or(false)

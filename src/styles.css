@@ -136,3 +136,16 @@ h1 { max-width: 710px; font-size: clamp(34px, 4.2vw, 55px); line-height: 1.04; l
 .empty-note { color: var(--muted); font-size: 13px; }
 @media (max-width: 680px) { .output-row { grid-template-columns: auto 1fr; } .output-size { text-align: left; } .output-main, .output-badge { grid-column: 2; } .output-badge { max-width: 100%; justify-self: start; } }
 @media (prefers-color-scheme: dark) { .output-row { background: rgba(39,46,54,.72); } .output-row.picked { background: rgba(29,120,245,.14); } .output-badge.copy { color: #72d8b4; background: #203d34; } .output-badge.newer { color: #f0c46b; background: #3d321a; } }
+.tab-switch { display: inline-flex; gap: 4px; padding: 4px; margin: 0 0 22px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,.6); }
+.tab-switch button { min-height: 32px; padding: 0 14px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font-size: 13px; font-weight: 650; cursor: pointer; }
+.tab-switch button.active { background: #fff; color: #176fe2; box-shadow: 0 2px 10px rgba(45,62,80,.08); }
+.image-grid { list-style: none; margin: 0 0 90px; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+.image-card { position: relative; display: grid; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 14px; background: rgba(255,255,255,.72); cursor: pointer; transition: border-color .16s, background .16s; }
+.image-card:hover { border-color: rgba(22,119,255,.32); }
+.image-card.picked { border-color: rgba(22,119,255,.6); background: rgba(22,119,255,.07); }
+.image-card input { position: absolute; top: 16px; left: 16px; width: 18px; height: 18px; accent-color: #176fe2; z-index: 1; }
+.image-card img { width: 100%; aspect-ratio: 3 / 2; object-fit: cover; border-radius: 9px; background: rgba(30,43,56,.06); }
+.image-meta { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 12px; }
+.image-meta small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.image-card .output-badge { max-width: 100%; justify-self: start; }
+@media (prefers-color-scheme: dark) { .tab-switch { background: rgba(39,46,54,.6); } .tab-switch button.active { background: #2f3842; color: #8bc1ff; } .image-card { background: rgba(39,46,54,.72); } .image-card.picked { background: rgba(29,120,245,.14); } }

@@ -2,7 +2,7 @@
 //! persona elige qué mandar a la Papelera.
 
 use crate::engine::file_size;
-use crate::harnesses::{identical_copies, user_search_roots};
+use crate::harnesses::{identical_copies, is_work_dir, user_search_roots};
 use chrono::{DateTime, Local};
 use serde::Serialize;
 use serde_json::json;
@@ -147,22 +147,21 @@ pub fn list_large_outputs() -> Result<Vec<OutputItem>, String> {
     Ok(list_for(&home()?, MIN_BYTES, true))
 }
 
-pub(crate) fn trash_for(home: &Path, paths: Vec<String>, manifest_dir: &Path) -> Result<TrashResult, String> {
-    let workspace = workspace(home);
-    let real_workspace = fs::canonicalize(&workspace).map_err(|_| "Codex workspace not found".to_string())?;
+/// Manda a la Papelera solo los archivos cuya ruta real pasa `allowed`
+/// (`outputs/../work/x` no pasa) y deja un registro.
+fn trash_checked(paths: Vec<String>, manifest_dir: &Path, kind: &str, allowed: &dyn Fn(&Path) -> bool) -> Result<TrashResult, String> {
     fs::create_dir_all(manifest_dir).map_err(|e| e.to_string())?;
-    let manifest_path = manifest_dir.join(format!("outputs-{}.jsonl", Local::now().format("%Y%m%d-%H%M%S-%6f")));
+    let manifest_path = manifest_dir.join(format!("{kind}-{}.jsonl", Local::now().format("%Y%m%d-%H%M%S-%6f")));
     let mut manifest = OpenOptions::new().create_new(true).write(true).open(&manifest_path).map_err(|e| e.to_string())?;
     let mut result = TrashResult { moved: 0, freed_bytes: 0, manifest_path: manifest_path.display().to_string(), errors: Vec::new() };
 
     for raw in paths {
         let path = PathBuf::from(&raw);
-        // Se revisa la ruta real: `outputs/../work/x` no pasa.
         let real = fs::canonicalize(&path).ok();
         let safe = fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file())
-            && real.as_deref().is_some_and(|r| is_output_file(r, &real_workspace));
+            && real.as_deref().is_some_and(allowed);
         let (true, Some(real)) = (safe, real) else {
-            result.errors.push(format!("{raw}: not a Codex output file"));
+            result.errors.push(format!("{raw}: not allowed here"));
             continue;
         };
         let size = file_size(&real);
@@ -170,7 +169,7 @@ pub(crate) fn trash_for(home: &Path, paths: Vec<String>, manifest_dir: &Path) ->
             Ok(()) => {
                 result.moved += 1;
                 result.freed_bytes += size;
-                writeln!(manifest, "{}", json!({"type": "trash_output", "path": raw, "bytes": size, "time": Local::now().to_rfc3339()}))
+                writeln!(manifest, "{}", json!({"type": kind, "path": raw, "bytes": size, "time": Local::now().to_rfc3339()}))
                     .map_err(|e| e.to_string())?;
             }
             Err(error) => result.errors.push(format!("{raw}: {error}")),
@@ -180,10 +179,87 @@ pub(crate) fn trash_for(home: &Path, paths: Vec<String>, manifest_dir: &Path) ->
     Ok(result)
 }
 
+pub(crate) fn trash_for(home: &Path, paths: Vec<String>, manifest_dir: &Path) -> Result<TrashResult, String> {
+    let real_workspace = fs::canonicalize(workspace(home)).map_err(|_| "Codex workspace not found".to_string())?;
+    trash_checked(paths, manifest_dir, "outputs", &|real| is_output_file(real, &real_workspace))
+}
+
 pub fn trash_outputs(paths: Vec<String>) -> Result<TrashResult, String> {
     let home = home()?;
     let manifest_dir = home.join(".conversation-reclaim");
     trash_for(&home, paths, &manifest_dir)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedImage {
+    path: String,
+    name: String,
+    chat: String,
+    bytes: u64,
+    modified: String,
+    copy_path: Option<String>,
+}
+
+fn generated_dir(home: &Path) -> PathBuf {
+    home.join(".codex").join("generated_images")
+}
+
+/// Imágenes generadas por Codex: primero las recomendadas (ya hay una copia
+/// idéntica fuera de `work/`), luego el resto, cada grupo de mayor a menor.
+pub(crate) fn generated_for(home: &Path, find_copies: bool) -> Vec<GeneratedImage> {
+    let dir = generated_dir(home);
+    let paths: Vec<PathBuf> = WalkDir::new(&dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file() && file_size(e.path()) > 0)
+        .map(|e| e.into_path())
+        .collect();
+    let workspace = workspace(home);
+    let copies = if find_copies && !paths.is_empty() {
+        identical_copies(&paths, &user_search_roots(home), &|d| is_work_dir(d, &workspace))
+    } else {
+        HashMap::new()
+    };
+    let mut items: Vec<GeneratedImage> = paths
+        .iter()
+        .map(|path| GeneratedImage {
+            path: path.display().to_string(),
+            name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+            chat: path
+                .parent()
+                .and_then(|p| p.file_name())
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            bytes: file_size(path),
+            modified: fs::metadata(path)
+                .and_then(|m| m.modified())
+                .map(|t| DateTime::<Local>::from(t).format("%Y-%m-%d").to_string())
+                .unwrap_or_default(),
+            copy_path: copies.get(path).map(|c| c.display().to_string()),
+        })
+        .collect();
+    items.sort_by(|a, b| {
+        b.copy_path.is_some().cmp(&a.copy_path.is_some()).then(b.bytes.cmp(&a.bytes)).then_with(|| a.path.cmp(&b.path))
+    });
+    items
+}
+
+pub fn list_generated_images() -> Result<Vec<GeneratedImage>, String> {
+    Ok(generated_for(&home()?, true))
+}
+
+pub(crate) fn trash_generated_for(home: &Path, paths: Vec<String>, manifest_dir: &Path) -> Result<TrashResult, String> {
+    let real_dir = fs::canonicalize(generated_dir(home)).map_err(|_| "Codex generated images not found".to_string())?;
+    trash_checked(paths, manifest_dir, "generated-images", &|real| real.starts_with(&real_dir) && real != real_dir)
+}
+
+pub fn trash_generated_images(paths: Vec<String>) -> Result<TrashResult, String> {
+    let home = home()?;
+    let manifest_dir = home.join(".conversation-reclaim");
+    trash_generated_for(&home, paths, &manifest_dir)
 }
 
 #[cfg(test)]
@@ -208,6 +284,36 @@ mod tests {
         for item in items.iter().take(3) {
             println!("{} {} {}", item.bytes, item.task, item.name);
         }
+    }
+
+    #[test]
+    fn generated_images_put_the_ones_with_a_copy_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        make(home, ".codex/generated_images/chat-a/big.png", &[b'a'; 300]);
+        make(home, ".codex/generated_images/chat-a/copied.png", &[b'b'; 100]);
+        make(home, ".codex/generated_images/chat-b/in-work-only.png", &[b'c'; 200]);
+        make(home, "Downloads/kept.png", &[b'b'; 100]);
+        make(home, "Documents/Codex/d/t/work/draft.png", &[b'c'; 200]);
+        let items = generated_for(home, true);
+        let names: Vec<_> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["copied.png", "big.png", "in-work-only.png"]);
+        assert!(items[0].copy_path.as_deref().is_some_and(|c| c.ends_with("kept.png")));
+        assert!(items[2].copy_path.is_none(), "a copy inside work/ does not count");
+        assert_eq!(items[0].chat, "chat-a");
+    }
+
+    #[test]
+    fn generated_trash_only_accepts_files_inside_generated_images() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let image = make(home, ".codex/generated_images/chat/x.png", b"img");
+        let other = make(home, ".codex/sessions/rollout.jsonl", b"{}");
+        let sneaky = format!("{}/.codex/generated_images/../sessions/rollout.jsonl", home.display());
+        let result = trash_generated_for(home, vec![other.display().to_string(), sneaky], &home.join("m")).unwrap();
+        assert_eq!(result.moved, 0);
+        assert_eq!(result.errors.len(), 2);
+        assert!(other.exists() && image.exists());
     }
 
     #[test]

@@ -48,7 +48,7 @@ from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home()
-VERSION = "3.8.0"
+VERSION = "3.9.0"
 MANIFEST_DIR = HOME / ".conversation-reclaim"
 TRANSIENT_MEDIA_MIN_AGE = 7 * 24 * 60 * 60
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -2652,13 +2652,71 @@ def print_outputs(items, limit):
         print(f"  … y {len(items) - limit} más (usa --limit)")
 
 
-def trash_outputs(items, choices):
-    """Manda a la Papelera los outputs elegidos por número o por ruta."""
+def _codex_chat_titles():
+    """{id de conversación: título} desde el índice de Codex (solo lectura)."""
+    state = PATHS["codex_state"]
+    if not state.exists():
+        return {}
+    try:
+        uri = "file:" + str(state) + "?mode=ro&immutable=1"
+        with closing(sqlite3.connect(uri, uri=True)) as con:
+            rows = con.execute("SELECT id, COALESCE(NULLIF(name, ''), title) FROM threads").fetchall()
+        return {thread: (title or "").strip() for thread, title in rows}
+    except sqlite3.Error:
+        return {}
+
+
+def codex_generated_list(find_copies=True):
+    """Imágenes generadas por Codex: primero las recomendadas (ya hay una
+    copia idéntica fuera de work/), luego el resto, de mayor a menor."""
+    generated = PATHS["codex_generated"]
+    workspace = PATHS["codex_workspace"]
+    titles = _codex_chat_titles()
+    items = []
+    if generated.is_dir():
+        for path in generated.rglob("*"):
+            try:
+                st = path.lstat()
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode) and st.st_size > 0:
+                chat = path.parent.name
+                items.append({"path": path, "size": st.st_size, "mtime": st.st_mtime,
+                              "task": titles.get(chat) or chat, "copy": None, "newer": None})
+    if find_copies and items:
+        copies = find_identical_copies([i["path"] for i in items], user_search_roots(),
+                                       skip_dir=lambda d: _is_codex_work_dir(d, workspace))
+        for item in items:
+            item["copy"] = copies.get(item["path"])
+    items.sort(key=lambda i: (i["copy"] is None, -i["size"], str(i["path"])))
+    return items
+
+
+def print_generated(items, limit):
+    generated = PATHS["codex_generated"]
+    recommended = [i for i in items if i["copy"]]
+    print(f"Imágenes generadas por Codex: {len(items)}, {human(sum(i['size'] for i in items))}")
+    print(f"  recomendadas (ya tienes una copia idéntica): {len(recommended)} "
+          f"({human(sum(i['size'] for i in recommended))})")
+    print("  Nada se borra solo. Para mandar a la Papelera: reclaim.py generated --to-trash <número> ...")
+    print()
+    for number, item in enumerate(items[:limit], 1):
+        mark = (f"  RECOMENDADA, copia en {str(item['copy']).replace(str(HOME), '~')}"
+                if item["copy"] else "")
+        date = datetime.fromtimestamp(item["mtime"]).strftime("%Y-%m-%d")
+        print(f"{number:>4}. {human(item['size']):>9}  {date}  {item['task'][:48]:<48}  "
+              f"{item['path'].relative_to(generated)}{mark}")
+    if len(items) > limit:
+        print(f"  … y {len(items) - limit} más (usa --limit)")
+
+
+def trash_outputs(items, choices, root=None, action="trash_output"):
+    """Manda a la Papelera los elegidos por número o por ruta (solo dentro de `root`)."""
     trash = trash_root()
     if trash is None:
         print("  REFUSED: este sistema no tiene Papelera conocida.")
         return 4
-    workspace = PATHS["codex_workspace"]
+    workspace = PATHS["codex_workspace"] if root is None else root
     chosen = []
     for choice in choices:
         if choice.isdigit():
@@ -2670,7 +2728,7 @@ def trash_outputs(items, choices):
         else:
             path = Path(choice).expanduser().resolve()
             if not any(path == i["path"].resolve() for i in items):
-                print(f"  REFUSED: {choice} no es un output de Codex de la lista.")
+                print(f"  REFUSED: {choice} no está en la lista.")
                 return 2
             chosen.append(path)
     trash.mkdir(parents=True, exist_ok=True)
@@ -2681,7 +2739,7 @@ def trash_outputs(items, choices):
             continue
         size = discard(path, trash)
         freed += size
-        entries.append(change_entry("codex", "trash_output", path, size, trash=str(trash)))
+        entries.append(change_entry("codex", action, path, size, trash=str(trash)))
         print(f"  a la Papelera: {path.relative_to(workspace)} ({human(size)})")
     if entries:
         write_manifest(entries)
@@ -2788,15 +2846,15 @@ def restore(backup_dir):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="conversation-reclaim v" + VERSION)
     ap.add_argument("mode", nargs="?", default="scan",
-                    choices=["scan", "apply", "apply-db", "restore", "skills", "outputs"])
+                    choices=["scan", "apply", "apply-db", "restore", "skills", "outputs", "generated"])
     ap.add_argument("--limit", type=int, default=40,
-                    help="outputs: cuántos archivos mostrar (por defecto 40)")
+                    help="outputs/generated: cuántos archivos mostrar (por defecto 40)")
     ap.add_argument("--external", action="append", default=[], metavar="CARPETA",
                     help="outputs: buscar copias también en esta carpeta (por ejemplo un disco externo)")
     ap.add_argument("--no-copies", action="store_true",
-                    help="outputs: no buscar copias (más rápido)")
+                    help="outputs/generated: no buscar copias (más rápido)")
     ap.add_argument("--to-trash", nargs="+", dest="trash_items", default=[], metavar="N",
-                    help="outputs: mandar a la Papelera estos números de la lista (o rutas)")
+                    help="outputs/generated: mandar a la Papelera estos números de la lista (o rutas)")
     ap.add_argument("--backup-dir", default=None,
                     help="destino del respaldo completo (opcional; disco externo recomendado)")
     ap.add_argument("--no-backup", action="store_true",
@@ -2841,6 +2899,13 @@ def main(argv=None):
         if args.trash_items:
             return trash_outputs(items, args.trash_items)
         print_outputs(items, args.limit)
+        return 0
+    elif args.mode == "generated":
+        items = codex_generated_list(find_copies=not args.no_copies)
+        if args.trash_items:
+            return trash_outputs(items, args.trash_items, root=PATHS["codex_generated"],
+                                 action="trash_generated_image")
+        print_generated(items, args.limit)
         return 0
     elif args.mode == "skills":
         sk = scan_skills()
