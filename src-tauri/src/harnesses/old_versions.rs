@@ -216,8 +216,10 @@ mod tests {
     fn running_versions_are_kept() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
-        let old = make(home, "desktop/2.1.304/claude", false);
+        make(home, "desktop/2.1.304/claude", false);
         make(home, "desktop/2.1.308/claude", false);
+        // Ruta armada por partes para que use el separador del sistema.
+        let old = home.join("desktop").join("2.1.304").join("claude");
         let running = vec![format!("{} --flag", old.display())];
         assert!(candidates(home, Some(&home.join("desktop")), &running).is_empty());
     }
