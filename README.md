@@ -102,6 +102,7 @@ python3 reclaim.py outputs --to-trash 3 7 12  # move only the numbers you choose
 python3 reclaim.py outputs --external /Volumes/DISK  # also look for copies on an external disk
 python3 reclaim.py generated                  # Codex generated images; recommended ones (already copied) first
 python3 reclaim.py generated --to-trash 1 2   # move only the images you choose to the Trash
+python3 reclaim.py outputs --open 3           # open item 3 with its app (--reveal 3 shows it in Finder)
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO   # prune opencode.db (opencode closed, backup required or --no-backup)
 python3 reclaim.py apply-db --no-backup --close-opencode  # warn, quit OpenCode normally, then prune
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO --drop-v1-copy  # OpenCode 2: also drop the leftover OpenCode 1 copy
@@ -215,7 +216,9 @@ Two more differences with OpenCode 2:
   already have an identical copy outside Codex `work/` folders are marked as
   recommended and listed first, with the chat title. In the app, the **Large
   files** page has a **Generated images** tab with thumbnails (the app may
-  only read that folder to show them).
+  only read that folder to show them). Every file in both lists can be
+  previewed in the app (images, video, audio), opened with its app, or shown
+  in Finder/Explorer before you decide.
 - Extras are **off by default** and only touch what hasn't changed in N
   days (`--older-than`, default 14; the app has the same setting). With
   `--trash` everything goes to the Trash, including the original of every

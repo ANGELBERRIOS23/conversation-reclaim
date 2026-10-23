@@ -893,6 +893,21 @@ class OutputsListTests(OutputsFixture):
         self.assertTrue((trash / "Documents/Codex/d/t/outputs/video.mp4").exists())
 
 
+class OpenListedTests(OutputsFixture):
+    def test_open_and_reveal_use_the_listed_file_only(self):
+        video = self.make("Documents/Codex/d/t/outputs/video.mp4", 300)
+        items = self.listing(find_copies=False)
+        with mock.patch.object(reclaim.subprocess, "run") as run, \
+             mock.patch.object(reclaim.sys, "platform", "darwin"), \
+             redirect_stdout(io.StringIO()):
+            self.assertEqual(reclaim.open_listed(items, "1"), 0)
+            self.assertEqual(reclaim.open_listed(items, "1", reveal=True), 0)
+            self.assertEqual(reclaim.open_listed(items, str(self.root / "otro.mp4")), 2)
+        self.assertEqual(run.call_args_list[0].args[0], ["open", str(video)])
+        self.assertEqual(run.call_args_list[1].args[0], ["open", "-R", str(video)])
+        self.assertEqual(run.call_count, 2)
+
+
 class GeneratedListTests(OutputsFixture):
     def setUp(self):
         super().setUp()

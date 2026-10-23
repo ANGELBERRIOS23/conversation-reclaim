@@ -55,6 +55,16 @@ async fn trash_generated_images(paths: Vec<String>) -> Result<outputs::TrashResu
 }
 
 #[tauri::command]
+fn open_large_file(path: String) -> Result<(), String> {
+    outputs::open_large_file(path)
+}
+
+#[tauri::command]
+fn reveal_large_file(path: String) -> Result<(), String> {
+    outputs::reveal_large_file(path)
+}
+
+#[tauri::command]
 fn reveal_manifest(path: String) -> Result<(), String> {
     engine::reveal_manifest(&path)
 }
@@ -111,6 +121,8 @@ pub fn run() {
             trash_outputs,
             list_generated_images,
             trash_generated_images,
+            open_large_file,
+            reveal_large_file,
             check_for_update,
             install_update
         ])

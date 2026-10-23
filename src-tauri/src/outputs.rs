@@ -262,6 +262,54 @@ pub fn trash_generated_images(paths: Vec<String>) -> Result<TrashResult, String>
     trash_generated_for(&home, paths, &manifest_dir)
 }
 
+/// Ruta real del archivo si es un output de Codex o una imagen generada.
+/// Solo esos se pueden abrir o mostrar desde la página de archivos grandes.
+pub(crate) fn listed_file(home: &Path, path: &str) -> Result<PathBuf, String> {
+    let real = fs::canonicalize(path).map_err(|_| "file not found".to_string())?;
+    if !fs::symlink_metadata(&real).is_ok_and(|m| m.file_type().is_file()) {
+        return Err("not a file".into());
+    }
+    let in_outputs = fs::canonicalize(workspace(home)).is_ok_and(|ws| is_output_file(&real, &ws));
+    let in_generated = fs::canonicalize(generated_dir(home)).is_ok_and(|dir| real.starts_with(&dir) && real != dir);
+    if in_outputs || in_generated {
+        Ok(real)
+    } else {
+        Err("only Codex outputs and generated images can be opened here".into())
+    }
+}
+
+fn run(command: &mut std::process::Command) -> Result<(), String> {
+    command.status().map_err(|e| e.to_string()).and_then(|status| {
+        if status.success() {
+            Ok(())
+        } else {
+            Err("the system could not open it".into())
+        }
+    })
+}
+
+/// Abre el archivo con la app que el sistema usa para ese tipo.
+pub fn open_large_file(path: String) -> Result<(), String> {
+    let real = listed_file(&home()?, &path)?;
+    #[cfg(target_os = "macos")]
+    return run(std::process::Command::new("open").arg(&real));
+    #[cfg(target_os = "windows")]
+    return run(std::process::Command::new("explorer").arg(&real)).or(Ok(()));
+    #[cfg(target_os = "linux")]
+    return run(std::process::Command::new("xdg-open").arg(&real));
+}
+
+/// Abre la carpeta del archivo con el archivo seleccionado (Finder/Explorador).
+pub fn reveal_large_file(path: String) -> Result<(), String> {
+    let real = listed_file(&home()?, &path)?;
+    #[cfg(target_os = "macos")]
+    return run(std::process::Command::new("open").arg("-R").arg(&real));
+    #[cfg(target_os = "windows")]
+    return run(std::process::Command::new("explorer").arg(format!("/select,{}", real.display()))).or(Ok(()));
+    #[cfg(target_os = "linux")]
+    return run(std::process::Command::new("xdg-open").arg(real.parent().unwrap_or(&real)));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,6 +362,23 @@ mod tests {
         assert_eq!(result.moved, 0);
         assert_eq!(result.errors.len(), 2);
         assert!(other.exists() && image.exists());
+    }
+
+    #[test]
+    fn only_listed_files_can_be_opened() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let output = make(home, "Documents/Codex/d/t/outputs/video.mp4", b"v");
+        let image = make(home, ".codex/generated_images/chat/x.png", b"i");
+        let work = make(home, "Documents/Codex/d/t/work/draft.mp4", b"w");
+        let personal = make(home, "Downloads/mine.pdf", b"p");
+        let sneaky = format!("{}/Documents/Codex/d/t/outputs/../work/draft.mp4", home.display());
+        assert!(listed_file(home, &output.display().to_string()).is_ok());
+        assert!(listed_file(home, &image.display().to_string()).is_ok());
+        assert!(listed_file(home, &work.display().to_string()).is_err());
+        assert!(listed_file(home, &personal.display().to_string()).is_err());
+        assert!(listed_file(home, &sneaky).is_err());
+        assert!(listed_file(home, &home.join(".codex/generated_images").display().to_string()).is_err());
     }
 
     #[test]

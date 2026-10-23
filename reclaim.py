@@ -2747,6 +2747,28 @@ def trash_outputs(items, choices, root=None, action="trash_output"):
     return 0
 
 
+def open_listed(items, choice, reveal=False):
+    """Abre (o muestra en su carpeta) un archivo de la lista por número o ruta."""
+    if choice.isdigit() and 1 <= int(choice) <= len(items):
+        path = items[int(choice) - 1]["path"]
+    else:
+        wanted = Path(choice).expanduser().resolve()
+        match = [i["path"] for i in items if i["path"].resolve() == wanted]
+        if not match:
+            print(f"  REFUSED: {choice} no está en la lista.")
+            return 2
+        path = match[0]
+    if sys.platform == "darwin":
+        command = ["open", "-R", str(path)] if reveal else ["open", str(path)]
+    elif _IS_WIN:
+        command = ["explorer", f"/select,{path}"] if reveal else ["explorer", str(path)]
+    else:
+        command = ["xdg-open", str(path.parent if reveal else path)]
+    subprocess.run(command)
+    print(f"  {'mostrando' if reveal else 'abriendo'}: {path}")
+    return 0
+
+
 def apply(args):
     manifest = []
     dest = None
@@ -2853,6 +2875,10 @@ def main(argv=None):
                     help="outputs: buscar copias también en esta carpeta (por ejemplo un disco externo)")
     ap.add_argument("--no-copies", action="store_true",
                     help="outputs/generated: no buscar copias (más rápido)")
+    ap.add_argument("--open", default=None, metavar="N",
+                    help="outputs/generated: abrir el número N de la lista con su app")
+    ap.add_argument("--reveal", default=None, metavar="N",
+                    help="outputs/generated: mostrar el número N en su carpeta (Finder/Explorador)")
     ap.add_argument("--to-trash", nargs="+", dest="trash_items", default=[], metavar="N",
                     help="outputs/generated: mandar a la Papelera estos números de la lista (o rutas)")
     ap.add_argument("--backup-dir", default=None,
@@ -2895,13 +2921,18 @@ def main(argv=None):
             print_extras(args.older_than)
         return 0
     elif args.mode == "outputs":
-        items = codex_outputs(find_copies=not args.no_copies, extra_roots=args.external)
+        items = codex_outputs(find_copies=not (args.no_copies or args.open or args.reveal),
+                              extra_roots=args.external)
+        if args.open or args.reveal:
+            return open_listed(items, args.open or args.reveal, reveal=bool(args.reveal))
         if args.trash_items:
             return trash_outputs(items, args.trash_items)
         print_outputs(items, args.limit)
         return 0
     elif args.mode == "generated":
-        items = codex_generated_list(find_copies=not args.no_copies)
+        items = codex_generated_list(find_copies=not (args.no_copies or args.open or args.reveal))
+        if args.open or args.reveal:
+            return open_listed(items, args.open or args.reveal, reveal=bool(args.reveal))
         if args.trash_items:
             return trash_outputs(items, args.trash_items, root=PATHS["codex_generated"],
                                  action="trash_generated_image")

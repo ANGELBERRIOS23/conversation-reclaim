@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import {
-  Check, ChevronDown, CircleHelp, ExternalLink,
+  Check, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, ExternalLink, Eye, FolderOpen,
   FileClock, FolderSearch, Globe2, HardDrive, Info, Languages,
   LoaderCircle, LockKeyhole, RefreshCw, ShieldCheck, Sparkles, Trash2,
 } from "lucide-react";
@@ -180,6 +180,15 @@ const copy = {
     recommendedCount: "recomendadas",
     selectRecommended: "Marcar las recomendadas",
     recommendedBadge: "Recomendada",
+    preview: "Ver",
+    openFile: "Abrir",
+    revealMac: "Mostrar en Finder",
+    revealOther: "Mostrar en la carpeta",
+    noPreview: "No hay vista previa para este tipo de archivo. Ábrelo con su app o muéstralo en la carpeta.",
+    markForTrash: "Marcar para la Papelera",
+    unmark: "Quitar marca",
+    previous: "Anterior",
+    next: "Siguiente",
   },
   en: {
     product: "Conversation Reclaim",
@@ -286,6 +295,15 @@ const copy = {
     recommendedCount: "recommended",
     selectRecommended: "Select the recommended ones",
     recommendedBadge: "Recommended",
+    preview: "Preview",
+    openFile: "Open",
+    revealMac: "Show in Finder",
+    revealOther: "Show in folder",
+    noPreview: "No preview for this file type. Open it with its app or show it in its folder.",
+    markForTrash: "Mark for Trash",
+    unmark: "Unmark",
+    previous: "Previous",
+    next: "Next",
   },
 };
 
@@ -337,6 +355,16 @@ const demoImages: GeneratedImage[] = [
   { path: demoTile(140), name: "exec-draft.png", chat: "Ilustración", bytes: 1_920_000, modified: "2026-10-13", copyPath: null },
 ];
 
+type PreviewKind = "image" | "video" | "audio" | null;
+
+function previewKind(name: string): PreviewKind {
+  const extension = name.split(".").pop()?.toLowerCase() ?? "";
+  if (["png", "jpg", "jpeg", "webp", "gif", "heic", "bmp", "svg"].includes(extension)) return "image";
+  if (["mp4", "mov", "m4v", "webm"].includes(extension)) return "video";
+  if (["wav", "mp3", "m4a", "aac", "ogg", "flac"].includes(extension)) return "audio";
+  return null;
+}
+
 const DEFAULT_AGE_DAYS = 14;
 
 function savedAgeDays() {
@@ -376,6 +404,7 @@ export default function App() {
   const [pickedOutputs, setPickedOutputs] = useState<Set<string>>(new Set());
   const [trashModal, setTrashModal] = useState<"confirm" | "done" | null>(null);
   const [trashResult, setTrashResult] = useState<TrashResult | null>(null);
+  const [previewPath, setPreviewPath] = useState<string | null>(null);
   const t = copy[lang];
   const nameOf = (category: Category) => translatedNames[category.key] ? t[translatedNames[category.key]] : category.name;
 
@@ -501,6 +530,40 @@ export default function App() {
 
   const activeList: { path: string; bytes: number; copyPath: string | null }[] = (largeTab === "outputs" ? outputs : images) ?? [];
   const pickedBytes = activeList.filter((item) => pickedOutputs.has(item.path)).reduce((sum, item) => sum + item.bytes, 0);
+
+  const fileSource = (path: string) => isTauri() && (path.startsWith("/") || /^[A-Za-z]:\\/.test(path)) ? convertFileSrc(path) : path;
+  const revealLabel = isMac ? t.revealMac : t.revealOther;
+
+  const runFileAction = async (command: "open_large_file" | "reveal_large_file", path: string) => {
+    if (!isTauri()) return;
+    try {
+      await invoke(command, { path });
+    } catch (cause) {
+      setError(String(cause));
+      setModal("error");
+    }
+  };
+
+  const previewItems: { path: string; name: string; bytes: number; label: string }[] = largeTab === "outputs"
+    ? (outputs ?? []).map((item) => ({ path: item.path, name: item.name, bytes: item.bytes, label: item.task }))
+    : (images ?? []).map((item) => ({ path: item.path, name: item.name, bytes: item.bytes, label: item.chat }));
+  const previewIndex = previewItems.findIndex((item) => item.path === previewPath);
+  const previewItem = previewIndex >= 0 ? previewItems[previewIndex] : null;
+  const movePreview = (delta: number) => {
+    if (previewIndex < 0 || !previewItems.length) return;
+    setPreviewPath(previewItems[(previewIndex + delta + previewItems.length) % previewItems.length].path);
+  };
+
+  useEffect(() => {
+    if (!previewPath) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPreviewPath(null);
+      if (event.key === "ArrowRight") movePreview(1);
+      if (event.key === "ArrowLeft") movePreview(-1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   const switchLargeTab = (tab: "outputs" | "images") => {
     if (tab === largeTab) return;
@@ -656,12 +719,16 @@ export default function App() {
                 const picked = pickedOutputs.has(item.path);
                 const source = isTauri() ? convertFileSrc(item.path) : item.path;
                 return <li key={item.path}>
-                  <label className={`image-card ${picked ? "picked" : ""}`} title={item.path}>
-                    <input type="checkbox" checked={picked} onChange={() => togglePicked(item.path)} disabled={outputsBusy !== null} />
-                    <img src={source} alt={item.name} loading="lazy" />
+                  <div className={`image-card ${picked ? "picked" : ""}`} title={item.path}>
+                    <input type="checkbox" aria-label={item.name} checked={picked} onChange={() => togglePicked(item.path)} disabled={outputsBusy !== null} />
+                    <button className="image-thumb" onClick={() => setPreviewPath(item.path)} aria-label={`${t.preview}: ${item.name}`}><img src={source} alt={item.name} loading="lazy" /></button>
                     <span className="image-meta"><strong>{formatBytes(item.bytes)}</strong><small>{item.chat} · {item.modified}</small></span>
                     {item.copyPath && <span className="output-badge copy" title={item.copyPath}>{t.recommendedBadge} · {t.copyAt} {item.copyPath.split(/[\\/]/).slice(-2).join("/")}</span>}
-                  </label>
+                    <span className="row-actions">
+                      <button className="icon-button" title={t.openFile} aria-label={t.openFile} onClick={() => void runFileAction("open_large_file", item.path)}><ExternalLink size={15} /></button>
+                      <button className="icon-button" title={revealLabel} aria-label={revealLabel} onClick={() => void runFileAction("reveal_large_file", item.path)}><FolderOpen size={15} /></button>
+                    </span>
+                  </div>
                 </li>;
               })}
             </ul>}
@@ -670,13 +737,20 @@ export default function App() {
               {outputs.map((item) => {
                 const picked = pickedOutputs.has(item.path);
                 return <li key={item.path}>
-                  <label className={`output-row ${picked ? "picked" : ""}`}>
-                    <input type="checkbox" checked={picked} onChange={() => togglePicked(item.path)} disabled={outputsBusy !== null} />
+                  <div className={`output-row ${picked ? "picked" : ""}`}>
+                    <input type="checkbox" aria-label={item.name} checked={picked} onChange={() => togglePicked(item.path)} disabled={outputsBusy !== null} />
                     <strong className="output-size">{formatBytes(item.bytes)}</strong>
-                    <span className="output-main"><span className="output-name" title={item.path}>{item.name}</span><small>{item.task} · {item.modified}</small></span>
-                    {item.copyPath && <span className="output-badge copy" title={item.copyPath}>{t.copyAt} {item.copyPath.split(/[\\/]/).slice(-2).join("/")}</span>}
-                    {!item.copyPath && item.newerVersion && <span className="output-badge newer" title={item.newerVersion}>{t.newerVersion}: {item.newerVersion}</span>}
-                  </label>
+                    <button className="output-main" onClick={() => setPreviewPath(item.path)} title={item.path}><span className="output-name">{item.name}</span><small>{item.task} · {item.modified}</small></button>
+                    <span className="output-badges">
+                      {item.copyPath && <span className="output-badge copy" title={item.copyPath}>{t.copyAt} {item.copyPath.split(/[\\/]/).slice(-2).join("/")}</span>}
+                      {!item.copyPath && item.newerVersion && <span className="output-badge newer" title={item.newerVersion}>{t.newerVersion}: {item.newerVersion}</span>}
+                    </span>
+                    <span className="row-actions">
+                      {previewKind(item.name) && <button className="icon-button" title={t.preview} aria-label={t.preview} onClick={() => setPreviewPath(item.path)}><Eye size={15} /></button>}
+                      <button className="icon-button" title={t.openFile} aria-label={t.openFile} onClick={() => void runFileAction("open_large_file", item.path)}><ExternalLink size={15} /></button>
+                      <button className="icon-button" title={revealLabel} aria-label={revealLabel} onClick={() => void runFileAction("reveal_large_file", item.path)}><FolderOpen size={15} /></button>
+                    </span>
+                  </div>
                 </li>;
               })}
             </ul>}
@@ -706,6 +780,27 @@ export default function App() {
           </section>
         </div>}
       </main>
+
+      {previewItem && <div className="modal-backdrop" role="presentation" onMouseDown={() => setPreviewPath(null)}><section className="modal preview-modal" role="dialog" aria-modal="true" aria-label={previewItem.name} onMouseDown={(event) => event.stopPropagation()}>
+        <div className="preview-media">
+          {previewKind(previewItem.name) === "image" && <img src={fileSource(previewItem.path)} alt={previewItem.name} />}
+          {previewKind(previewItem.name) === "video" && <video key={previewItem.path} src={fileSource(previewItem.path)} controls autoPlay />}
+          {previewKind(previewItem.name) === "audio" && <audio key={previewItem.path} src={fileSource(previewItem.path)} controls autoPlay />}
+          {!previewKind(previewItem.name) && <p className="empty-note">{t.noPreview}</p>}
+          {previewItems.length > 1 && <>
+            <button className="preview-nav previous" onClick={() => movePreview(-1)} aria-label={t.previous}><ChevronLeft size={20} /></button>
+            <button className="preview-nav next" onClick={() => movePreview(1)} aria-label={t.next}><ChevronRight size={20} /></button>
+          </>}
+        </div>
+        <h2 className="preview-title" title={previewItem.path}>{previewItem.name}</h2>
+        <p>{formatBytes(previewItem.bytes)} · {previewItem.label} · {previewIndex + 1}/{previewItems.length}</p>
+        <div className="modal-actions preview-actions">
+          <button className={pickedOutputs.has(previewItem.path) ? "secondary-button marked" : "secondary-button"} onClick={() => togglePicked(previewItem.path)} disabled={outputsBusy !== null}><Trash2 size={15} />{pickedOutputs.has(previewItem.path) ? t.unmark : t.markForTrash}</button>
+          <button className="secondary-button" onClick={() => void runFileAction("open_large_file", previewItem.path)} disabled={!isTauri()}><ExternalLink size={15} />{t.openFile}</button>
+          <button className="secondary-button" onClick={() => void runFileAction("reveal_large_file", previewItem.path)} disabled={!isTauri()}><FolderOpen size={15} />{revealLabel}</button>
+          <button className="primary-button" onClick={() => setPreviewPath(null)}>{t.close}</button>
+        </div>
+      </section></div>}
 
       {trashModal && <div className="modal-backdrop" role="presentation" onMouseDown={() => setTrashModal(null)}><section className="modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
         <span className={`modal-icon ${trashModal === "done" ? "success" : "confirm"}`}>{trashModal === "done" ? <Check size={28} /> : <Trash2 size={27} />}</span>

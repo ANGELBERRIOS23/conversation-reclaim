@@ -102,6 +102,7 @@ python3 reclaim.py outputs --to-trash 3 7 12  # manda a la Papelera solo los nú
 python3 reclaim.py outputs --external /Volumes/DISCO  # busca copias también en un disco externo
 python3 reclaim.py generated                  # imágenes generadas por Codex; primero las recomendadas (ya copiadas)
 python3 reclaim.py generated --to-trash 1 2   # manda a la Papelera solo las imágenes que elijas
+python3 reclaim.py outputs --open 3           # abre el 3 con su app (--reveal 3 lo muestra en Finder)
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO   # poda opencode.db (opencode cerrado; respaldo obligatorio o --no-backup)
 python3 reclaim.py apply-db --no-backup --close-opencode  # avisa, cierra OpenCode normalmente y poda
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO --drop-v1-copy  # OpenCode 2: borra también la copia vieja de OpenCode 1
@@ -222,7 +223,9 @@ Otras dos diferencias con OpenCode 2:
   ya tienen una copia idéntica fuera de las carpetas `work/` de Codex salen
   primero como recomendadas, con el título del chat. En la app, la página
   **Archivos grandes** tiene la pestaña **Imágenes generadas** con miniaturas
-  (la app solo puede leer esa carpeta para mostrarlas).
+  (la app solo puede leer esa carpeta para mostrarlas). Cada archivo de las dos
+  listas se puede ver dentro de la app (imágenes, video y audio), abrir con su
+  app o mostrar en Finder/Explorador antes de decidir.
 - Los extras vienen **desmarcados** y solo tocan lo que no cambió en N días
   (`--older-than`, 14 por defecto; la app tiene el mismo ajuste). Con
   `--trash` todo va a la Papelera, incluido el original de cada chat que se
