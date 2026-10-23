@@ -92,6 +92,11 @@ python3 reclaim.py apply --backup-dir /Volumes/DISCO/respaldos-ia   # optional f
 python3 reclaim.py apply --only antigravity   # one tool only
 python3 reclaim.py apply --only media         # only old temporary image attachments (optional)
 python3 reclaim.py apply --include-media      # include old temporary attachments in a full cleanup
+python3 reclaim.py scan --extras             # also measure the optional extras below
+python3 reclaim.py apply --only images --trash        # images inside old Claude Code / Codex chats
+python3 reclaim.py apply --only codex-work --trash    # screenshots and drafts in Codex work/ folders
+python3 reclaim.py apply --only old-versions --trash  # old Claude Code / Codex versions and leftovers
+python3 reclaim.py apply --extras --older-than 30     # all extras, only what hasn't changed in 30 days
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO   # prune opencode.db (opencode closed, backup required or --no-backup)
 python3 reclaim.py apply-db --no-backup --close-opencode  # warn, quit OpenCode normally, then prune
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO --drop-v1-copy  # OpenCode 2: also drop the leftover OpenCode 1 copy
@@ -122,6 +127,9 @@ English and it answers in English.
 | **Antigravity / Gemini** | `~/.gemini/antigravity{,,-cli,-ide}/conversations/*.db` | steps `step_type 98` (CONVERSATION_HISTORY) | prunes pre-compaction steps + transcripts, scratch, logs, caches, `browser_recordings` |
 | **Temporary media (optional)** | OS temp `codex-clipboard-*` and Antigravity `tempmediaStorage` | older than 7 days, regular file, not open | deletes only structurally identified temporary images; old chat previews may disappear |
 | **Command Code** | `~/.commandcode/projects/` | none detected | scan/backup only |
+| **Conversation images (extra)** | Claude Code `~/.claude/projects` and Codex `~/.codex/sessions` (`.jsonl` and `.jsonl.zst`) | unchanged for N days (default 14) | rewrites the chat without its base64 images: images the model saw become a short text, UI copies become a 1×1 PNG; every other line stays byte-for-byte identical and the chat can still be resumed |
+| **Codex work files (extra)** | `~/Documents/Codex/<date>/<task>/work/` and `~/.codex/generated_images` | unchanged for N days | removes images and videos in `work/` only when the task has files in `outputs/`; never `outputs/`, never inside a git repo; generated images go only if an identical copy exists outside `work/` |
+| **Old versions and leftovers (extra)** | `~/.local/share/claude/versions`, Claude desktop `claude-code/`, `~/.codex/packages/standalone/releases`, `~/.claude/file-history`, Codex `*.bak-*` | version in use and newest always kept; restore points and backups unchanged for N days | removes old program versions, old restore points, and repair backups |
 
 ## The OpenCode database problem (opencode-db-prune, integrated)
 
@@ -189,8 +197,16 @@ Two more differences with OpenCode 2:
   Antigravity's explicit temporary-media folders. Files newer than seven days,
   files in use, symlinks, and images in normal brain/project folders are kept.
   An old conversation may lose its local image preview after this cleanup.
-- Cleanup may run from inside Codex: Codex rollouts are always preserved;
-  regenerable cache files remain eligible.
+- Cleanup may run from inside Codex: Codex rollouts are preserved by every
+  default category; regenerable cache files remain eligible. Only the
+  optional **conversation images** extra rewrites a rollout, and it keeps
+  `session_meta`, line order, and every line without images untouched.
+- Extras are **off by default** and only touch what hasn't changed in N
+  days (`--older-than`, default 14; the app has the same setting). With
+  `--trash` everything goes to the Trash, including the original of every
+  rewritten chat, so nothing is lost until you empty it. Cowork sessions are
+  never rewritten: each line carries a signature (`_audit_hmac`) that would
+  stop matching.
 
 ### Repair rollouts damaged by earlier versions
 

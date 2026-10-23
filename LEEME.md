@@ -92,6 +92,11 @@ python3 reclaim.py apply --backup-dir /Volumes/DISCO/respaldos-ia   # respaldo c
 python3 reclaim.py apply --only antigravity   # solo una herramienta
 python3 reclaim.py apply --only media         # solo adjuntos temporales antiguos (opcional)
 python3 reclaim.py apply --include-media      # incluir adjuntos temporales en una limpieza completa
+python3 reclaim.py scan --extras             # mide también los extras opcionales de abajo
+python3 reclaim.py apply --only images --trash        # imágenes dentro de chats viejos de Claude Code / Codex
+python3 reclaim.py apply --only codex-work --trash    # capturas y borradores en las carpetas work/ de Codex
+python3 reclaim.py apply --only old-versions --trash  # versiones viejas de Claude Code / Codex y restos
+python3 reclaim.py apply --extras --older-than 30     # todos los extras, solo lo que no cambió en 30 días
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO   # poda opencode.db (opencode cerrado; respaldo obligatorio o --no-backup)
 python3 reclaim.py apply-db --no-backup --close-opencode  # avisa, cierra OpenCode normalmente y poda
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO --drop-v1-copy  # OpenCode 2: borra también la copia vieja de OpenCode 1
@@ -122,6 +127,9 @@ Pídele en español y responde en español; en inglés, en inglés.
 | **Antigravity / Gemini** | `~/.gemini/antigravity{,,-cli,-ide}/conversations/*.db` | pasos `step_type 98` (CONVERSATION_HISTORY) | poda pasos pre-compactación + transcripts, scratch, logs, caches, `browser_recordings` |
 | **Medios temporales (opcional)** | temporales del sistema `codex-clipboard-*` y `tempmediaStorage` de Antigravity | más de 7 días, archivo regular y cerrado | borra solo imágenes temporales identificadas estructuralmente; una vista previa antigua puede desaparecer |
 | **Command Code** | `~/.commandcode/projects/` | ninguno detectado | solo escaneo/respaldo |
+| **Imágenes en conversaciones (extra)** | Claude Code `~/.claude/projects` y Codex `~/.codex/sessions` (`.jsonl` y `.jsonl.zst`) | sin cambios en N días (14 por defecto) | reescribe el chat sin sus imágenes en base64: las que veía el modelo pasan a un texto corto y las copias de la interfaz a un PNG de 1×1; las demás líneas quedan idénticas y el chat se puede retomar |
+| **Archivos de trabajo de Codex (extra)** | `~/Documents/Codex/<fecha>/<tarea>/work/` y `~/.codex/generated_images` | sin cambios en N días | borra imágenes y videos de `work/` solo si la tarea tiene archivos en `outputs/`; nunca `outputs/` ni dentro de un repo git; las imágenes generadas solo si hay una copia idéntica fuera de `work/` |
+| **Versiones viejas y restos (extra)** | `~/.local/share/claude/versions`, `claude-code/` de la app de Claude, `~/.codex/packages/standalone/releases`, `~/.claude/file-history`, `*.bak-*` de Codex | siempre se queda la versión en uso y la más nueva; puntos de restauración y respaldos sin cambios en N días | borra versiones viejas, puntos de restauración viejos y respaldos de reparación |
 
 ## El problema del opencode.db (opencode-db-prune, integrado)
 
@@ -196,8 +204,16 @@ Otras dos diferencias con OpenCode 2:
   de Antigravity. Conserva archivos de menos de siete días, abiertos, symlinks
   e imágenes en carpetas normales de proyectos/brain. Una conversación antigua
   puede perder su vista previa local después de esta limpieza.
-- Se puede limpiar desde Codex: todos los rollouts quedan protegidos; solo
-  sus archivos de caché regenerables siguen siendo elegibles.
+- Se puede limpiar desde Codex: ninguna categoría por defecto toca los
+  rollouts; solo sus cachés regenerables siguen siendo elegibles. Solo el
+  extra opcional de **imágenes en conversaciones** reescribe un rollout, y
+  conserva `session_meta`, el orden y todas las líneas sin imágenes.
+- Los extras vienen **desmarcados** y solo tocan lo que no cambió en N días
+  (`--older-than`, 14 por defecto; la app tiene el mismo ajuste). Con
+  `--trash` todo va a la Papelera, incluido el original de cada chat que se
+  reescribe, así que no se pierde nada hasta vaciarla. Las sesiones de Cowork
+  nunca se reescriben: cada línea lleva una firma (`_audit_hmac`) que dejaría
+  de cuadrar.
 
 ### Reparar rollouts dañados por versiones anteriores
 

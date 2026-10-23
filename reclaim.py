@@ -23,6 +23,10 @@ Uso:
                                              # respalda y reduce
     python3 reclaim.py apply-db               # poda opencode.db (requiere opencode cerrado)
     python3 reclaim.py restore --backup-dir /ruta   # restaura desde el respaldo
+    python3 reclaim.py scan --extras          # mide también los extras
+    python3 reclaim.py apply --extras --trash # imágenes en conversaciones,
+                                             # work/ de Codex y versiones viejas
+                                             # (sin cambios en 14+ días; --older-than)
 
 Solo requiere la librería estándar de Python 3.8+.
 """
@@ -44,7 +48,7 @@ from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home()
-VERSION = "3.7.0"
+VERSION = "3.8.0"
 MANIFEST_DIR = HOME / ".conversation-reclaim"
 TRANSIENT_MEDIA_MIN_AGE = 7 * 24 * 60 * 60
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -227,6 +231,12 @@ if _IS_WIN:
 else:
     _AG_APP = HOME / "Library" / "Application Support" / "Antigravity"
     _AG_IDE_APP = HOME / "Library" / "Application Support" / "Antigravity IDE"
+if _IS_WIN:
+    _CLAUDE_DESKTOP = Path(_APPDATA) / "Claude"
+elif sys.platform == "darwin":
+    _CLAUDE_DESKTOP = HOME / "Library" / "Application Support" / "Claude"
+else:
+    _CLAUDE_DESKTOP = HOME / ".config" / "Claude"
 
 def _opencode_dir():
     cand = [HOME / ".local" / "share" / "opencode"]
@@ -258,6 +268,14 @@ PATHS = {
     "gemini": HOME / ".gemini",
     "antigravity_app": _AG_APP,
     "antigravity_ide_app": _AG_IDE_APP,
+    "claude_file_history": HOME / ".claude" / "file-history",
+    "claude_cli_versions": HOME / ".local" / "share" / "claude" / "versions",
+    "claude_cli_link": HOME / ".local" / "bin" / "claude",
+    "claude_desktop_code": _CLAUDE_DESKTOP / "claude-code",
+    "codex_releases": HOME / ".codex" / "packages" / "standalone" / "releases",
+    "codex_current": HOME / ".codex" / "packages" / "standalone" / "current",
+    "codex_generated": HOME / ".codex" / "generated_images",
+    "codex_workspace": HOME / "Documents" / "Codex",
 }
 
 # Subdirectorios de Antigravity/Gemini y su rol
@@ -586,6 +604,13 @@ def scan_opencode():
     return {"db_total": db_total, "events": ev, "redundant": red,
             "compactions": len(comps), "reclaim": reclaim,
             "layout": layout, "v1_copy": v1_copy}
+
+
+def file_size(p):
+    try:
+        return Path(p).lstat().st_size
+    except OSError:
+        return 0
 
 
 def dir_size(p):
@@ -1877,6 +1902,617 @@ def apply_transient_media():
     return freed, entries
 
 
+# ---------------------------------------------------------------------------
+# Extras (v3.8): imágenes dentro de conversaciones, archivos de trabajo de
+# Codex y versiones viejas. Solo tocan lo que no cambió en N días.
+# ---------------------------------------------------------------------------
+
+DEFAULT_MIN_AGE_DAYS = 14
+EXTRA_KINDS = ("images", "codex-work", "old-versions")
+IMAGE_PLACEHOLDER = "[imagen quitada por conversation-reclaim]"
+# PNG de 1x1: ocupa el lugar de una imagen en las copias que solo usa la
+# interfaz, para no cambiar la forma del registro.
+TINY_PNG_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+                "YAAAAAYAAjCB0C8AAAAASUVORK5CYII=")
+TINY_PNG_URL = "data:image/png;base64," + TINY_PNG_B64
+MIN_IMAGE_CHARS = 1024
+VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
+WORK_MEDIA_SUFFIXES = IMAGE_SUFFIXES | VIDEO_SUFFIXES | {".heic", ".tif", ".tiff", ".bmp"}
+DUPLICATE_SEARCH_SKIP = {"node_modules", ".git", ".venv", "venv", "Library", ".Trash"}
+
+
+def _cutoff(min_age_days, reference_time=None):
+    return (time.time() if reference_time is None else reference_time) - min_age_days * 86400
+
+
+def _regular_file(path):
+    try:
+        return stat.S_ISREG(Path(path).lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _claude_image_block_size(block):
+    """Tamaño del base64 si `block` es un bloque de imagen que ve el modelo."""
+    if block.get("type") != "image":
+        return 0
+    source = block.get("source")
+    if not isinstance(source, dict) or source.get("type") != "base64":
+        return 0
+    data = source.get("data")
+    return len(data) if isinstance(data, str) and len(data) > MIN_IMAGE_CHARS else 0
+
+
+def strip_claude_images(obj):
+    """Quita las imágenes en base64 de un registro de Claude Code (en sitio).
+
+    Los bloques que ve el modelo pasan a ser un texto corto, así la
+    conversación se puede retomar. Las copias que solo usa la interfaz
+    (toolUseResult, adjuntos) quedan como un PNG de 1x1 para no cambiar su
+    forma. Los PDF y las firmas de razonamiento no se tocan.
+    Devuelve los caracteres retirados.
+    """
+    removed = 0
+    if isinstance(obj, list):
+        for i, item in enumerate(obj):
+            size = _claude_image_block_size(item) if isinstance(item, dict) else 0
+            if size:
+                removed += size
+                obj[i] = {"type": "text", "text": IMAGE_PLACEHOLDER}
+            else:
+                removed += strip_claude_images(item)
+    elif isinstance(obj, dict):
+        for key, value in obj.items():
+            if (key == "source" and isinstance(value, dict)
+                    and value.get("type") == "base64"
+                    and str(value.get("media_type", "")).startswith("image/")
+                    and isinstance(value.get("data"), str)
+                    and len(value["data"]) > MIN_IMAGE_CHARS):
+                removed += len(value["data"]) - len(TINY_PNG_B64)
+                value["data"] = TINY_PNG_B64
+                value["media_type"] = "image/png"
+            elif (key == "base64" and isinstance(value, str)
+                  and len(value) > MIN_IMAGE_CHARS
+                  and str(obj.get("type", "")).startswith("image/")):
+                removed += len(value) - len(TINY_PNG_B64)
+                obj[key] = TINY_PNG_B64
+                obj["type"] = "image/png"
+            else:
+                removed += strip_claude_images(value)
+    return removed
+
+
+def _codex_image_item_size(item):
+    if item.get("type") != "input_image":
+        return 0
+    url = item.get("image_url")
+    if isinstance(url, str) and url.startswith("data:image") and len(url) > MIN_IMAGE_CHARS:
+        return len(url)
+    return 0
+
+
+def strip_codex_images(obj):
+    """Quita las imágenes en base64 de un registro de Codex (en sitio).
+
+    Las imágenes que ve el modelo pasan a ser `input_text`; cualquier otra
+    `data:image` (capturas de la interfaz) queda como un PNG de 1x1. No toca
+    session_meta ni el número de orden de cada línea.
+    """
+    removed = 0
+    if isinstance(obj, list):
+        for i, item in enumerate(obj):
+            size = _codex_image_item_size(item) if isinstance(item, dict) else 0
+            if size:
+                removed += size
+                obj[i] = {"type": "input_text", "text": IMAGE_PLACEHOLDER}
+            else:
+                removed += strip_codex_images(item)
+    elif isinstance(obj, dict):
+        for key, value in obj.items():
+            if (isinstance(value, str) and value.startswith("data:image")
+                    and len(value) > MIN_IMAGE_CHARS):
+                removed += len(value) - len(TINY_PNG_URL)
+                obj[key] = TINY_PNG_URL
+            else:
+                removed += strip_codex_images(value)
+    return removed
+
+
+IMAGE_STRIPPERS = {
+    "claude": (b"base64", strip_claude_images),
+    "codex": (b"data:image", strip_codex_images),
+}
+
+
+def _zstd():
+    found = shutil.which("zstd")
+    if found:
+        return found
+    for candidate in ("/opt/homebrew/bin/zstd", "/usr/local/bin/zstd", "/usr/bin/zstd"):
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
+def _read_session(path, compressed=None):
+    """Contenido de una sesión .jsonl o .jsonl.zst (None si no se puede leer)."""
+    path = Path(path)
+    if compressed is None:
+        compressed = path.name.endswith(".zst")
+    if compressed:
+        zstd = _zstd()
+        if not zstd:
+            return None
+        result = subprocess.run([zstd, "-dcq", "--", str(path)], capture_output=True)
+        return result.stdout if result.returncode == 0 else None
+    return path.read_bytes()
+
+
+def strip_session_images(data, tool):
+    """Devuelve (contenido_nuevo, caracteres_retirados) o (None, error).
+
+    Solo vuelve a escribir las líneas que tienen imágenes; las demás quedan
+    byte por byte iguales. Si una línea con imagen no es JSON válido, no se
+    toca nada.
+    """
+    needle, stripper = IMAGE_STRIPPERS[tool]
+    lines = data.split(b"\n")
+    removed = 0
+    for i, raw in enumerate(lines):
+        if needle not in raw:
+            continue
+        body = raw[:-1] if raw.endswith(b"\r") else raw
+        record = parse_json_line(body)
+        if record is None:
+            return None, f"JSON inválido en línea {i + 1}"
+        cut = stripper(record)
+        if cut:
+            removed += cut
+            lines[i] = json.dumps(record, ensure_ascii=False,
+                                  separators=(",", ":")).encode("utf-8")
+    if not removed:
+        return data, 0
+    return b"\n".join(lines), removed
+
+
+def rewrite_session_without_images(path, tool, trash=None):
+    """Reescribe una sesión sin imágenes de forma atómica.
+
+    Devuelve (bytes_liberados_en_disco, hecho, error). Con `trash`, el
+    original se guarda ahí antes de reemplazarlo.
+    """
+    path = Path(path)
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        return 0, False, str(exc)
+    if not stat.S_ISREG(before.st_mode):
+        return 0, False, "no es un archivo regular"
+    data = _read_session(path)
+    if data is None:
+        return 0, False, "no se pudo leer (¿falta zstd?)"
+    new, removed = strip_session_images(data, tool)
+    if new is None:
+        return 0, False, removed
+    if not removed:
+        return 0, False, None
+    compressed = path.name.endswith(".zst")
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.",
+                                    suffix=".reclaim-tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            if compressed:
+                result = subprocess.run([_zstd(), "-q", "-c", "-"], input=new,
+                                        capture_output=True)
+                if result.returncode != 0:
+                    raise RuntimeError("zstd no pudo comprimir")
+                out.write(result.stdout)
+            else:
+                out.write(new)
+            out.flush()
+            os.fsync(out.fileno())
+        if _read_session(tmp, compressed) != new:
+            raise RuntimeError("la copia nueva no coincide")
+        shutil.copystat(path, tmp, follow_symlinks=False)
+        current = path.lstat()
+        signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns)
+        if signature(before) != signature(current):
+            raise RuntimeError("cambió mientras se limpiaba")
+        if trash is not None:
+            keep = _trash_destination(trash, path)
+            shutil.copy2(path, keep)
+        after = tmp.stat().st_size
+        os.replace(str(tmp), str(path))
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        return 0, False, str(exc)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return before.st_size - after, True, None
+
+
+def conversation_image_candidates(min_age_days, reference_time=None):
+    """Sesiones de Claude Code y Codex sin cambios en N días.
+
+    Cowork no entra: cada línea lleva una firma (_audit_hmac) que dejaría de
+    cuadrar.
+    """
+    cutoff = _cutoff(min_age_days, reference_time)
+    found = []
+    roots = [("claude", PATHS["claude_projects"], ("*.jsonl",)),
+             ("codex", PATHS["codex_sessions"], ("*.jsonl", "*.jsonl.zst")),
+             ("codex", PATHS["codex_archived"], ("*.jsonl", "*.jsonl.zst"))]
+    for tool, root, patterns in roots:
+        if not root.exists():
+            continue
+        for pattern in patterns:
+            for path in sorted(root.rglob(pattern)):
+                try:
+                    st = path.lstat()
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff:
+                    found.append((tool, path))
+    return found
+
+
+def estimate_session_images(path, tool):
+    data = _read_session(path)
+    if data is None:
+        return 0
+    _new, removed = strip_session_images(data, tool)
+    return removed if isinstance(removed, int) else 0
+
+
+def _inside_git_tree(directory, stop):
+    directory = Path(directory)
+    stop = Path(stop)
+    while True:
+        if (directory / ".git").exists():
+            return True
+        if directory == stop or directory.parent == directory:
+            return False
+        directory = directory.parent
+
+
+def codex_work_candidates(min_age_days, reference_time=None):
+    """Imágenes y videos que Codex dejó en `work/` de tareas viejas.
+
+    Nunca toca `outputs/` (lo entregado) ni archivos dentro de un repositorio
+    git. Si la tarea no tiene nada en `outputs/`, lo entregado puede estar en
+    `work/`, así que esa tarea no se toca.
+    Estructura: ~/Documents/Codex/<fecha>/<tarea>/work/...
+    """
+    cutoff = _cutoff(min_age_days, reference_time)
+    root = PATHS["codex_workspace"]
+    found = []
+    if not root.is_dir():
+        return found
+    for work in sorted(root.glob("*/*/work")):
+        if not work.is_dir() or work.is_symlink():
+            continue
+        outputs = work.parent / "outputs"
+        if not outputs.is_dir() or not any(p.is_file() for p in outputs.rglob("*")):
+            continue
+        for current, dirs, files in os.walk(work):
+            if ".git" in dirs or ".git" in files:
+                dirs[:] = []
+                continue
+            dirs[:] = [d for d in dirs if d != "node_modules"]
+            for name in files:
+                path = Path(current) / name
+                if path.suffix.lower() not in WORK_MEDIA_SUFFIXES:
+                    continue
+                try:
+                    st = path.lstat()
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff and st.st_size > 0:
+                    found.append(path)
+    return found
+
+
+def _is_codex_work_dir(directory, workspace):
+    try:
+        parts = Path(directory).relative_to(workspace).parts
+    except ValueError:
+        return False
+    return len(parts) >= 3 and parts[2] == "work"
+
+
+def _sha256(path):
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def codex_generated_duplicates(min_age_days, search_roots=None, reference_time=None):
+    """Imágenes generadas por Codex que ya tienen una copia idéntica guardada.
+
+    Devuelve [(imagen_generada, copia)]. Las que no tienen copia se quedan.
+    """
+    cutoff = _cutoff(min_age_days, reference_time)
+    generated = PATHS["codex_generated"]
+    by_size = defaultdict(list)
+    if generated.is_dir():
+        for path in generated.rglob("*"):
+            try:
+                st = path.lstat()
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff and st.st_size > 0:
+                by_size[st.st_size].append(path)
+    if not by_size:
+        return []
+    if search_roots is None:
+        # Todas las carpetas visibles del usuario (proyectos incluidos), sin
+        # seguir enlaces: así no se bajan archivos de la nube por accidente.
+        search_roots = [p for p in HOME.iterdir()
+                        if p.is_dir() and not p.is_symlink() and not p.name.startswith(".")
+                        and p.name not in DUPLICATE_SEARCH_SKIP | {"Applications"}]
+    hashes = {}
+    found = {}
+    workspace = PATHS["codex_workspace"]
+    for root in search_roots:
+        if not Path(root).is_dir():
+            continue
+        for current, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in DUPLICATE_SEARCH_SKIP]
+            # Una copia dentro de work/ de Codex no cuenta: también se limpia.
+            if _is_codex_work_dir(Path(current), workspace):
+                dirs[:] = []
+                continue
+            for name in files:
+                copy = Path(current) / name
+                try:
+                    st = copy.lstat()
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode) or st.st_size not in by_size:
+                    continue
+                pending = [g for g in by_size[st.st_size] if g not in found]
+                if not pending:
+                    continue
+                try:
+                    copy_hash = _sha256(copy)
+                    for original in pending:
+                        if original not in hashes:
+                            hashes[original] = _sha256(original)
+                        if hashes[original] == copy_hash:
+                            found[original] = copy
+                except OSError:
+                    continue
+    return sorted(found.items())
+
+
+def _version_key(name):
+    return tuple(int(part) for part in re.findall(r"\d+", name))
+
+
+def _running_commands():
+    if _IS_WIN:
+        return []
+    try:
+        result = subprocess.run(["ps", "-axo", "command="], capture_output=True, text=True)
+        return result.stdout.splitlines() if result.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
+def _keep_newest(paths, also_keep=()):
+    """Todas menos la más nueva y las de `also_keep` (comparadas por ruta real)."""
+    ordered = sorted(paths, key=lambda p: _version_key(p.name))
+    keep = {Path(p).resolve() for p in also_keep}
+    if ordered:
+        keep.add(ordered[-1].resolve())
+    return [p for p in ordered if p.resolve() not in keep]
+
+
+def old_version_candidates(min_age_days, reference_time=None):
+    """Versiones viejas de Claude Code y Codex, y restos que ya no sirven.
+
+    Se queda siempre la versión en uso y la más nueva. Los puntos de
+    restauración de Claude (file-history) y los respaldos de reparación de
+    Codex solo se van si no cambiaron en N días.
+    Devuelve [(etiqueta, ruta)].
+    """
+    cutoff = _cutoff(min_age_days, reference_time)
+    running = _running_commands()
+    in_use = lambda p: any(cmd.startswith(str(p)) for cmd in running)
+    found = []
+
+    versions = PATHS["claude_cli_versions"]
+    if versions.is_dir():
+        current = set()
+        link = PATHS["claude_cli_link"]
+        if link.exists():
+            current.add(link.resolve())
+        entries = [p for p in versions.iterdir() if not p.is_symlink()]
+        for path in _keep_newest(entries, current):
+            if not in_use(path) and database_in_use(path) is False:
+                found.append(("Claude Code (terminal) versión vieja", path))
+
+    desktop = PATHS["claude_desktop_code"]
+    if desktop.is_dir():
+        entries = [p for p in desktop.iterdir() if p.is_dir() and not p.is_symlink()
+                   and _version_key(p.name)]
+        for path in _keep_newest(entries):
+            if not in_use(path):
+                found.append(("Claude Code (app de escritorio) versión vieja", path))
+
+    releases = PATHS["codex_releases"]
+    if releases.is_dir():
+        current = set()
+        if PATHS["codex_current"].exists():
+            current.add(PATHS["codex_current"].resolve())
+        entries = [p for p in releases.iterdir() if p.is_dir() and not p.is_symlink()]
+        for path in _keep_newest(entries, current):
+            if not in_use(path):
+                found.append(("Codex versión vieja", path))
+
+    history = PATHS["claude_file_history"]
+    if history.is_dir():
+        for session in history.iterdir():
+            if not session.is_dir() or session.is_symlink():
+                continue
+            newest = max((f.stat().st_mtime for f in session.rglob("*") if f.is_file()),
+                         default=session.stat().st_mtime)
+            if newest < cutoff:
+                found.append(("Claude Code punto de restauración viejo", session))
+
+    for base in (PATHS["codex_sessions"], PATHS["codex_archived"]):
+        if base.is_dir():
+            for path in base.rglob("*.bak-*"):
+                if _regular_file(path) and path.stat().st_mtime < cutoff:
+                    found.append(("Codex respaldo de reparación", path))
+    return found
+
+
+def trash_root():
+    """Carpeta de la Papelera para esta limpieza (None si el sistema no tiene)."""
+    if sys.platform == "darwin":
+        base = HOME / ".Trash"
+    elif not _IS_WIN:
+        base = HOME / ".local" / "share" / "Trash" / "files"
+    else:
+        return None
+    return base / f"conversation-reclaim {datetime.now().strftime('%Y-%m-%d %H.%M.%S')}"
+
+
+def _trash_destination(trash, path):
+    try:
+        relative = Path(path).relative_to(HOME)
+    except ValueError:
+        relative = Path(*Path(path).parts[1:])
+    destination = Path(trash) / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    return destination
+
+
+def discard(path, trash=None):
+    """Borra un archivo o carpeta, o lo mueve a la Papelera. Devuelve bytes."""
+    path = Path(path)
+    size = dir_size(path)
+    if trash is None:
+        remove_path(path)
+    else:
+        shutil.move(str(path), str(_trash_destination(trash, path)))
+    return size
+
+
+def scan_extras(min_age_days):
+    images = defaultdict(lambda: [0, 0])
+    for tool, path in conversation_image_candidates(min_age_days):
+        cut = estimate_session_images(path, tool)
+        if cut:
+            images[tool][0] += 1
+            images[tool][1] += cut
+    work = codex_work_candidates(min_age_days)
+    generated = codex_generated_duplicates(min_age_days)
+    versions = old_version_candidates(min_age_days)
+    return {
+        "images": dict(images),
+        "work": (len(work), sum(file_size(p) for p in work)),
+        "generated": (len(generated), sum(file_size(g) for g, _copy in generated)),
+        "versions": [(label, path, dir_size(path)) for label, path in versions],
+    }
+
+
+def print_extras(min_age_days):
+    print()
+    print(f"  Extras (sin cambios en {min_age_days}+ días; apply --extras o --only <tipo>):")
+    r = scan_extras(min_age_days)
+    for tool, label in (("claude", "Claude Code"), ("codex", "Codex")):
+        n, cut = r["images"].get(tool, (0, 0))
+        note = " (sin comprimir)" if tool == "codex" else ""
+        print(f"    imágenes en conversaciones de {label:<12}{human(cut):>10}{note}  ({n} sesiones)")
+    n, size = r["work"]
+    print(f"    imágenes/videos en work/ de Codex        {human(size):>10}  ({n} archivos)")
+    n, size = r["generated"]
+    print(f"    imágenes generadas ya copiadas en otro lado {human(size):>7}  ({n} archivos)")
+    total = sum(size for _label, _path, size in r["versions"])
+    print(f"    versiones viejas y restos                {human(total):>10}  ({len(r['versions'])})")
+    for label, path, size in r["versions"]:
+        if size > 5 * 1024 * 1024:
+            print(f"        {human(size):>9}  {label}: {path.name}")
+    print("    Cowork no se toca: sus líneas llevan firma y dejarían de cuadrar.")
+    return r
+
+
+def open_files():
+    """Rutas abiertas por cualquier proceso, con una sola llamada a lsof.
+
+    Devuelve None si no se puede saber (Windows o lsof falló); entonces se
+    pregunta archivo por archivo.
+    """
+    if _IS_WIN:
+        return None
+    try:
+        result = subprocess.run(["lsof", "-w", "-Fn"], capture_output=True, text=True,
+                                errors="replace")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode not in (0, 1):
+        return None
+    return {line[1:] for line in result.stdout.splitlines() if line.startswith("n/")}
+
+
+def _in_use(path, opened):
+    if opened is None:
+        return database_in_use(path) is not False
+    return str(path) in opened
+
+
+def apply_extras(kinds, min_age_days, trash=None):
+    """Aplica las categorías extra elegidas. Devuelve (bytes, entradas)."""
+    freed = 0
+    entries = []
+    opened = open_files()
+    if "images" in kinds:
+        done = 0
+        for tool, path in conversation_image_candidates(min_age_days):
+            if _in_use(path, opened):
+                continue
+            cut, ok, error = rewrite_session_without_images(path, tool, trash)
+            if error:
+                print(f"  {path.name}: se omite ({error})")
+            if ok:
+                freed += cut
+                done += 1
+                entries.append(change_entry(tool, "strip_images", path, cut,
+                                            reason=f"imágenes de sesión sin cambios en {min_age_days}+ días"))
+        print(f"  imágenes en conversaciones: {human(freed)} ({done} sesiones)")
+    if "codex-work" in kinds:
+        part = 0
+        for path in codex_work_candidates(min_age_days):
+            if _in_use(path, opened):
+                continue
+            size = discard(path, trash)
+            part += size
+            entries.append(change_entry("codex", "delete_work_media", path, size,
+                                        reason=f"work/ sin cambios en {min_age_days}+ días"))
+        for original, copy in codex_generated_duplicates(min_age_days):
+            size = discard(original, trash)
+            part += size
+            entries.append(change_entry("codex", "delete_generated_duplicate", original, size,
+                                        copy=str(copy)))
+        freed += part
+        print(f"  archivos de trabajo de Codex: {human(part)}")
+    if "old-versions" in kinds:
+        part = 0
+        for label, path in old_version_candidates(min_age_days):
+            size = discard(path, trash)
+            part += size
+            entries.append(change_entry("tools", "delete_old_version", path, size, reason=label))
+        freed += part
+        print(f"  versiones viejas y restos: {human(part)}")
+    return freed, entries
+
+
 def apply(args):
     manifest = []
     dest = None
@@ -1897,6 +2533,23 @@ def apply(args):
     print("=" * 72)
     freed = 0
     only = args.only
+    extras = set()
+    if only in EXTRA_KINDS:
+        extras.add(only)
+    elif only is None and getattr(args, "extras", False):
+        extras.update(EXTRA_KINDS)
+    if extras:
+        trash = None
+        if getattr(args, "trash", False):
+            trash = trash_root()
+            if trash is None:
+                print("  REFUSED: --trash no está disponible en este sistema.")
+                return 4
+            trash.mkdir(parents=True, exist_ok=True)
+            print(f"  Lo que se quite va a la Papelera: {trash}")
+        f, e = apply_extras(extras, getattr(args, "older_than", DEFAULT_MIN_AGE_DAYS), trash)
+        freed += f
+        manifest += e
     if only in (None, "claude"):
         f, e = apply_claude()
         freed += f
@@ -1973,10 +2626,18 @@ def main(argv=None):
                     help="no podar los pasos pre-compactación en las DB de Antigravity")
     ap.add_argument("--only", default=None,
                     choices=["claude", "codex", "opencode", "antigravity",
-                             "commandcode", "caches", "media"],
-                    help="aplicar reducciones solo a esta herramienta")
+                             "commandcode", "caches", "media", *EXTRA_KINDS],
+                    help="aplicar reducciones solo a esta herramienta o extra")
     ap.add_argument("--include-media", action="store_true",
                     help="incluir adjuntos temporales de más de 7 días (puede quitar vistas previas antiguas)")
+    ap.add_argument("--extras", action="store_true",
+                    help="incluir imágenes en conversaciones, archivos de trabajo de Codex "
+                         "y versiones viejas (en scan, también los mide)")
+    ap.add_argument("--older-than", type=int, default=DEFAULT_MIN_AGE_DAYS, metavar="DÍAS",
+                    help=f"extras: solo lo que no cambió en DÍAS (por defecto {DEFAULT_MIN_AGE_DAYS})")
+    ap.add_argument("--trash", action="store_true",
+                    help="extras: mandar a la Papelera en vez de borrar (y guardar ahí "
+                         "el original de cada conversación que se limpia)")
     ap.add_argument("--lang", default=None, choices=["es", "en"],
                     help="idioma de salida (por defecto: $LANG, español si no se detecta)")
     args = ap.parse_args(argv)
@@ -1984,8 +2645,12 @@ def main(argv=None):
     if args.lang:
         globals()["EN"] = args.lang == "en"
 
+    if args.older_than < 1:
+        ap.error("--older-than debe ser 1 o más")
     if args.mode == "scan":
         scan()
+        if args.extras:
+            print_extras(args.older_than)
         return 0
     elif args.mode == "skills":
         sk = scan_skills()

@@ -119,6 +119,12 @@ const copy = {
     installUpdate: "Instalar y reiniciar",
     installingUpdate: "Instalando…",
     temporaryMedia: "Medios temporales",
+    images: "Imágenes en conversaciones",
+    codexWork: "Archivos de trabajo de Codex",
+    oldVersions: "Versiones viejas y restos",
+    ageLabel: "Solo lo que no cambió en",
+    ageUnit: "días",
+    ageHelp: "Aplica a imágenes, archivos de trabajo y restos. Vuelve a analizar después de cambiarlo.",
   },
   en: {
     product: "Conversation Reclaim",
@@ -190,6 +196,12 @@ const copy = {
     installUpdate: "Install and restart",
     installingUpdate: "Installing…",
     temporaryMedia: "Temporary media",
+    images: "Conversation images",
+    codexWork: "Codex work files",
+    oldVersions: "Old versions and leftovers",
+    ageLabel: "Only what hasn't changed in",
+    ageUnit: "days",
+    ageHelp: "Applies to images, work files, and leftovers. Scan again after changing it.",
   },
 };
 
@@ -203,6 +215,9 @@ const demoScan: ScanResult = {
     { key: "opencode", name: "OpenCode", descriptionEs: "Archivos temporales, registros y snapshots", descriptionEn: "Temporary files, logs, and snapshots", logo: "opencode", bytes: 2_351_480_832, items: 418, recommended: false, protected: true, available: true, details: [] },
     { key: "antigravity", name: "Antigravity", descriptionEs: "Grabaciones del navegador y datos temporales", descriptionEn: "Browser recordings and temporary data", logo: "gemini", bytes: 884_695_040, items: 182, recommended: true, protected: true, available: true, details: [] },
     { key: "media", name: "Temporary media", descriptionEs: "Adjuntos temporales antiguos; las vistas previas pueden desaparecer", descriptionEn: "Old temporary attachments; previews may disappear", logo: "media", bytes: 487_587_840, items: 3603, recommended: false, protected: true, available: true, details: [] },
+    { key: "images", name: "Conversation images", descriptionEs: "Capturas guardadas en chats viejos de Claude Code y Codex; los chats se conservan", descriptionEn: "Screenshots stored in old Claude Code and Codex chats; the chats are kept", logo: "images", bytes: 716_177_408, items: 106, recommended: false, protected: true, available: true, details: [] },
+    { key: "codexWork", name: "Codex work files", descriptionEs: "Capturas y borradores en work/ de tareas viejas de Codex; outputs/ no se toca", descriptionEn: "Screenshots and drafts in work/ of old Codex tasks; outputs/ is never touched", logo: "codexWork", bytes: 4_509_715_456, items: 7263, recommended: false, protected: true, available: true, details: [] },
+    { key: "oldVersions", name: "Old versions and leftovers", descriptionEs: "Versiones viejas de Claude Code y Codex y puntos de restauración; la que usas se queda", descriptionEn: "Old Claude Code and Codex versions and restore points; the one in use stays", logo: "versions", bytes: 1_288_490_189, items: 26, recommended: false, protected: true, available: true, details: [] },
     { key: "cursor", name: "Cursor", descriptionEs: "Beta: cachés regenerables del editor Cursor; tus chats no se tocan", descriptionEn: "Beta: regenerable Cursor editor caches; your chats are not touched", logo: "cursor", bytes: 612_368_384, items: 27, recommended: false, protected: true, available: true, details: [] },
     { key: "copilot", name: "GitHub Copilot (VS Code)", descriptionEs: "Beta: cachés regenerables de VS Code, donde vive Copilot Chat; tus chats no se tocan", descriptionEn: "Beta: regenerable VS Code caches where Copilot Chat lives; your chats are not touched", logo: "copilot", bytes: 415_236_096, items: 19, recommended: false, protected: true, available: true, details: [] },
     { key: "trae", name: "Trae", descriptionEs: "Beta: cachés regenerables de Trae; sesiones, credenciales y certificados no se tocan", descriptionEn: "Beta: regenerable Trae caches; sessions, credentials, and certificates are not touched", logo: "trae", bytes: 0, items: 0, recommended: false, protected: true, available: false, details: [] },
@@ -224,6 +239,24 @@ function isTauri() {
   return "__TAURI_INTERNALS__" in window;
 }
 
+const DEFAULT_AGE_DAYS = 14;
+
+function savedAgeDays() {
+  try {
+    const saved = Number(localStorage.getItem("reclaim-older-than-days"));
+    return Number.isInteger(saved) && saved >= 1 ? saved : DEFAULT_AGE_DAYS;
+  } catch {
+    return DEFAULT_AGE_DAYS;
+  }
+}
+
+const translatedNames: Record<string, "temporaryMedia" | "images" | "codexWork" | "oldVersions"> = {
+  media: "temporaryMedia",
+  images: "images",
+  codexWork: "codexWork",
+  oldVersions: "oldVersions",
+};
+
 export default function App() {
   const [lang, setLang] = useState<Language>(() => (localStorage.getItem("reclaim-language") as Language) || "es");
   const [scan, setScan] = useState<ScanResult | null>(null);
@@ -237,14 +270,26 @@ export default function App() {
   const [updateStatus, setUpdateStatus] = useState<"idle" | "checking" | "current" | "available" | "installing" | "error">("idle");
   const [availableUpdate, setAvailableUpdate] = useState<UpdateInfo | null>(null);
   const [updateError, setUpdateError] = useState("");
+  const [ageDays, setAgeDays] = useState(savedAgeDays);
   const t = copy[lang];
+  const nameOf = (category: Category) => translatedNames[category.key] ? t[translatedNames[category.key]] : category.name;
+
+  const changeAgeDays = (value: number) => {
+    const days = Math.min(3650, Math.max(1, Math.round(value) || DEFAULT_AGE_DAYS));
+    setAgeDays(days);
+    try {
+      localStorage.setItem("reclaim-older-than-days", String(days));
+    } catch {
+      // Sin almacenamiento local el valor solo dura esta sesión.
+    }
+  };
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 
   const runScan = async () => {
     setBusy("scan");
     setError("");
     try {
-      const data = isTauri() ? await invoke<ScanResult>("scan_storage") : demoScan;
+      const data = isTauri() ? await invoke<ScanResult>("scan_storage", { olderThanDays: ageDays }) : demoScan;
       setScan(data);
       setSelected(new Set(data.categories.filter((item) => item.available && item.recommended && item.bytes > 0).map((item) => item.key)));
     } catch (cause) {
@@ -325,7 +370,7 @@ export default function App() {
     setModal(null);
     setBusy("clean");
     try {
-      const response = await invoke<ApplyResult>("apply_cleanup", { request: { categories: [...selected] } });
+      const response = await invoke<ApplyResult>("apply_cleanup", { request: { categories: [...selected], olderThanDays: ageDays } });
       setResult(response);
       setModal("success");
       await runScan();
@@ -386,13 +431,20 @@ export default function App() {
 
             <section className="section-heading">
               <div><h2>{t.choose}</h2><p>{t.chooseHelp}</p></div>
-              <button className="secondary-button scan-button" onClick={runScan} disabled={busy !== null}><RefreshCw size={16} className={busy === "scan" ? "spin" : ""} />{busy === "scan" ? t.scanning : t.scanNow}</button>
+              <div className="heading-actions">
+                <label className="age-control" title={t.ageHelp}>
+                  <span>{t.ageLabel}</span>
+                  <input type="number" min={1} max={3650} value={ageDays} onChange={(event) => changeAgeDays(Number(event.target.value))} disabled={busy !== null} />
+                  <span>{t.ageUnit}</span>
+                </label>
+                <button className="secondary-button scan-button" onClick={runScan} disabled={busy !== null}><RefreshCw size={16} className={busy === "scan" ? "spin" : ""} />{busy === "scan" ? t.scanning : t.scanNow}</button>
+              </div>
             </section>
 
             <section className="category-grid">
               {(scan?.categories ?? []).map((category) => {
                 const description = lang === "es" ? category.descriptionEs : category.descriptionEn;
-                const categoryName = category.key === "media" ? t.temporaryMedia : category.name;
+                const categoryName = nameOf(category);
                 const checked = selected.has(category.key);
                 const selectable = category.available && category.bytes > 0;
                 return <button key={category.key} className={`category-card ${checked ? "selected" : ""}`} onClick={() => selectable && toggle(category.key)} disabled={!selectable} aria-pressed={checked}>
@@ -447,7 +499,7 @@ export default function App() {
         <p>{modal === "confirm" ? t.confirmBody : modal === "success" ? resultBody : error}</p>
         {modal === "confirm" && <>
           <div className="confirm-total"><span>{t.estimate}</span><strong>{formatBytes(selectedBytes)}</strong></div>
-          {selectedCategories.length > 0 && <details><summary>{t.review}<CircleHelp size={15} /></summary>{selectedCategories.map((category) => <p key={category.key}>{category.key === "media" ? t.temporaryMedia : category.name}: {formatBytes(category.bytes)} · {category.items} {t.items}</p>)}</details>}
+          {selectedCategories.length > 0 && <details><summary>{t.review}<CircleHelp size={15} /></summary>{selectedCategories.map((category) => <p key={category.key}>{nameOf(category)}:{formatBytes(category.bytes)} · {category.items} {t.items}</p>)}</details>}
         </>}
         {modal === "success" && result && <>
           <div className="confirm-total"><span>{t.estimate}</span><strong>{formatBytes(result.plannedBytes)}</strong></div>

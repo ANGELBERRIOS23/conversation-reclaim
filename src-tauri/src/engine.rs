@@ -7,7 +7,35 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 use walkdir::WalkDir;
+
+pub(crate) const DEFAULT_MIN_AGE_DAYS: u64 = 14;
+static MIN_AGE_DAYS: AtomicU64 = AtomicU64::new(DEFAULT_MIN_AGE_DAYS);
+
+/// Fija cuántos días sin cambios necesita un archivo para entrar en las
+/// limpiezas que dependen de la edad (imágenes, trabajo de Codex, versiones).
+fn set_min_age_days(days: Option<u64>) {
+    let days = days.unwrap_or(DEFAULT_MIN_AGE_DAYS).clamp(1, 3650);
+    MIN_AGE_DAYS.store(days, Ordering::Relaxed);
+}
+
+pub(crate) fn min_age_days() -> u64 {
+    MIN_AGE_DAYS.load(Ordering::Relaxed)
+}
+
+/// Lo modificado antes de este momento es lo bastante viejo para limpiarse.
+pub(crate) fn age_cutoff() -> SystemTime {
+    SystemTime::now() - Duration::from_secs(min_age_days() * 86_400)
+}
+
+pub(crate) fn is_older_than_cutoff(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .and_then(|m| m.modified())
+        .map(|modified| modified < age_cutoff())
+        .unwrap_or(false)
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +66,8 @@ pub struct ScanResult {
 #[serde(rename_all = "camelCase")]
 pub struct ApplyRequest {
     categories: Vec<String>,
+    #[serde(default)]
+    older_than_days: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,6 +102,23 @@ impl Action {
             planned_bytes: bytes,
             marker_offset: None,
             reason: reason.into(),
+        }
+    }
+
+    /// Reescribe una sesión sin sus imágenes; la conversación se conserva.
+    pub(crate) fn strip_images(category: &str, path: PathBuf, bytes: u64, reason: &str) -> Self {
+        Self {
+            action: "strip_images".into(),
+            ..Self::delete(category, path, bytes, reason)
+        }
+    }
+
+    /// Borra una carpeta completa (versiones viejas, puntos de restauración).
+    pub(crate) fn delete_tree(category: &str, path: PathBuf, reason: &str) -> Self {
+        let bytes = collect_files(&path).iter().map(|p| file_size(p)).sum();
+        Self {
+            action: "delete_tree".into(),
+            ..Self::delete(category, path, bytes, reason)
         }
     }
 }
@@ -307,7 +354,8 @@ fn build_plan_for(
     Ok((actions, warnings, allowed_roots))
 }
 
-pub fn scan_storage() -> Result<ScanResult, String> {
+pub fn scan_storage(older_than_days: Option<u64>) -> Result<ScanResult, String> {
+    set_min_age_days(older_than_days);
     let (actions, mut warnings, _) = build_plan_for(None)?;
     let user_home = home()?;
     let mut categories = Vec::new();
@@ -391,7 +439,43 @@ fn atomic_trim(path: &Path, offset: u64) -> Result<u64, String> {
     Ok(offset)
 }
 
+/// Rutas abiertas por cualquier proceso, con una sola llamada a lsof.
+///
+/// `None` si no se puede saber; entonces se pregunta archivo por archivo.
+fn open_paths() -> Option<HashSet<PathBuf>> {
+    if cfg!(target_os = "windows") {
+        return None;
+    }
+    let executable = if cfg!(target_os = "macos") {
+        "/usr/sbin/lsof"
+    } else {
+        "/usr/bin/lsof"
+    };
+    let output = Command::new(executable).args(["-w", "-Fn"]).output().ok()?;
+    if !matches!(output.status.code(), Some(0) | Some(1)) {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.strip_prefix('n'))
+            .filter(|path| path.starts_with('/'))
+            .map(PathBuf::from)
+            .collect(),
+    )
+}
+
+fn is_active(path: &Path, tree: bool, opened: Option<&HashSet<PathBuf>>) -> bool {
+    match opened {
+        Some(set) if tree => set.iter().any(|open| open.starts_with(path)),
+        Some(set) => set.contains(path),
+        None if tree => collect_files(path).iter().any(|file| file_is_active(file)),
+        None => file_is_active(path),
+    }
+}
+
 pub fn apply_cleanup(request: ApplyRequest) -> Result<ApplyResult, String> {
+    set_min_age_days(request.older_than_days);
     let chosen: HashSet<_> = request.categories.into_iter().collect();
     if chosen.is_empty() {
         return Err("No cleanup categories were selected".into());
@@ -422,7 +506,7 @@ pub fn apply_cleanup(request: ApplyRequest) -> Result<ApplyResult, String> {
     writeln!(
         manifest,
         "{}",
-        json!({"type":"plan","version":"3.0.1","createdAt":Local::now().to_rfc3339(),"actions":selected})
+        json!({"type":"plan","version":env!("CARGO_PKG_VERSION"),"createdAt":Local::now().to_rfc3339(),"minAgeDays":min_age_days(),"actions":selected})
     )
     .map_err(|e| e.to_string())?;
     manifest.sync_all().map_err(|e| e.to_string())?;
@@ -431,12 +515,14 @@ pub fn apply_cleanup(request: ApplyRequest) -> Result<ApplyResult, String> {
     let mut skipped_bytes = 0u64;
     let mut applied = 0usize;
     let mut skipped = 0usize;
+    let opened = open_paths();
 
     for action in selected {
         let before = file_size(&action.path);
+        let tree = action.action == "delete_tree";
         let outcome = if !path_is_under(&action.path, &allowed) {
             Err("path outside allowed roots".to_string())
-        } else if file_is_active(&action.path) {
+        } else if is_active(&action.path, tree, opened.as_ref()) {
             Err("file is active or its state could not be verified".to_string())
         } else if fs::symlink_metadata(&action.path)
             .map(|m| m.file_type().is_symlink())
@@ -445,6 +531,12 @@ pub fn apply_cleanup(request: ApplyRequest) -> Result<ApplyResult, String> {
             Err("symbolic link or missing target".to_string())
         } else if action.action == "truncate" {
             atomic_trim(&action.path, action.marker_offset.unwrap_or(0))
+        } else if action.action == "strip_images" {
+            crate::harnesses::rewrite_without_images(&action.path)
+        } else if tree {
+            fs::remove_dir_all(&action.path)
+                .map(|_| action.planned_bytes)
+                .map_err(|e| e.to_string())
         } else {
             fs::remove_file(&action.path)
                 .map(|_| before)

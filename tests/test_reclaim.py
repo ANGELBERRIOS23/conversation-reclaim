@@ -586,5 +586,238 @@ class OpenCodeV2Tests(unittest.TestCase):
         run.assert_not_called()
 
 
+BIG = "A" * 4000
+
+
+def claude_image(data=BIG, media_type="image/png"):
+    return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}
+
+
+class ExtrasImageTests(unittest.TestCase):
+    def test_tiny_png_is_a_valid_one_pixel_png(self):
+        import base64
+        raw = base64.b64decode(reclaim.TINY_PNG_B64)
+        self.assertEqual(raw[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(raw[16:24], (1).to_bytes(4, "big") * 2)
+
+    def test_claude_model_images_become_text_and_ui_copies_shrink(self):
+        record = {
+            "message": {"role": "user", "content": [
+                claude_image(),
+                {"type": "tool_result", "content": [claude_image(), {"type": "text", "text": "ok"}]},
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                                "data": BIG}},
+                {"type": "thinking", "thinking": "x", "signature": BIG},
+            ]},
+            "toolUseResult": {"type": "image", "file": {"base64": BIG, "type": "image/jpeg"}},
+        }
+        removed = reclaim.strip_claude_images(record)
+        content = record["message"]["content"]
+        self.assertEqual(content[0], {"type": "text", "text": reclaim.IMAGE_PLACEHOLDER})
+        self.assertEqual(content[1]["content"][0]["type"], "text")
+        self.assertEqual(content[2]["source"]["data"], BIG)
+        self.assertEqual(content[3]["signature"], BIG)
+        self.assertEqual(record["toolUseResult"]["file"]["base64"], reclaim.TINY_PNG_B64)
+        self.assertEqual(record["toolUseResult"]["file"]["type"], "image/png")
+        self.assertGreater(removed, 3 * 3000)
+
+    def test_small_images_are_left_alone(self):
+        record = {"message": {"content": [claude_image("A" * 100)]}}
+        self.assertEqual(reclaim.strip_claude_images(record), 0)
+        self.assertEqual(record["message"]["content"][0]["type"], "image")
+
+    def test_codex_images_become_input_text_and_meta_is_untouched(self):
+        url = "data:image/png;base64," + BIG
+        records = [
+            {"ordinal": 0, "type": "session_meta", "payload": {"id": "x"}},
+            {"ordinal": 1, "type": "response_item", "payload": {
+                "type": "function_call_output",
+                "output": [{"type": "input_image", "image_url": url}]}},
+            {"ordinal": 2, "type": "event_msg", "payload": {
+                "item": {"result": {"screenshot": {"url": url}}}}},
+        ]
+        meta = json.dumps(records[0])
+        removed = sum(reclaim.strip_codex_images(r) for r in records)
+        self.assertEqual(json.dumps(records[0]), meta)
+        self.assertEqual(records[1]["payload"]["output"][0],
+                         {"type": "input_text", "text": reclaim.IMAGE_PLACEHOLDER})
+        self.assertEqual(records[2]["payload"]["item"]["result"]["screenshot"]["url"],
+                         reclaim.TINY_PNG_URL)
+        self.assertEqual(records[1]["ordinal"], 1)
+        self.assertGreater(removed, 2 * 3000)
+
+    def test_rewrite_keeps_other_lines_byte_identical_and_saves_original(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "session.jsonl"
+            plain = b'{"type": "user",  "message": {"content": "hola \xc3\xb1"}}'
+            image = json.dumps({"message": {"content": [claude_image()]}}).encode()
+            path.write_bytes(plain + b"\n" + image + b"\n")
+            os.utime(path, (1_000_000, 1_000_000))
+            original = path.read_bytes()
+            trash = root / "trash"
+            with mock.patch.object(reclaim, "HOME", root):
+                cut, done, error = reclaim.rewrite_session_without_images(path, "claude", trash)
+            self.assertIsNone(error)
+            self.assertTrue(done)
+            lines = path.read_bytes().split(b"\n")
+            self.assertEqual(lines[0], plain)
+            self.assertEqual(lines[2], b"")
+            self.assertEqual(json.loads(lines[1])["message"]["content"][0]["type"], "text")
+            self.assertEqual(path.stat().st_mtime, 1_000_000)
+            self.assertEqual(cut, len(original) - path.stat().st_size)
+            self.assertEqual((trash / "session.jsonl").read_bytes(), original)
+
+    def test_invalid_json_with_image_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "session.jsonl"
+            path.write_bytes(b'{"base64": broken\n')
+            before = path.read_bytes()
+            cut, done, error = reclaim.rewrite_session_without_images(path, "claude")
+            self.assertFalse(done)
+            self.assertIn("JSON", error)
+            self.assertEqual(path.read_bytes(), before)
+
+    @unittest.skipUnless(reclaim._zstd(), "zstd no está instalado")
+    def test_compressed_codex_session_round_trips(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rollout.jsonl.zst"
+            body = (json.dumps({"type": "session_meta", "payload": {}}) + "\n" +
+                    json.dumps({"payload": {"content": [
+                        {"type": "input_image", "image_url": "data:image/png;base64," + BIG}]}}) + "\n")
+            path.write_bytes(subprocess.run([reclaim._zstd(), "-q", "-c", "-"],
+                                            input=body.encode(), capture_output=True).stdout)
+            cut, done, error = reclaim.rewrite_session_without_images(path, "codex")
+            self.assertIsNone(error)
+            self.assertTrue(done)
+            text = reclaim._read_session(path).decode()
+            self.assertEqual(text.splitlines()[0], body.splitlines()[0])
+            self.assertIn(reclaim.IMAGE_PLACEHOLDER, text)
+            self.assertNotIn(BIG, text)
+
+    def test_candidates_respect_age_and_skip_other_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            projects = root / "projects" / "p"
+            projects.mkdir(parents=True)
+            old = projects / "old.jsonl"
+            new = projects / "new.jsonl"
+            other = projects / "notes.txt"
+            for f in (old, new, other):
+                f.write_text("{}\n")
+            now = 2_000_000_000
+            os.utime(old, (now - 15 * 86400, now - 15 * 86400))
+            os.utime(new, (now - 86400, now - 86400))
+            os.utime(other, (now - 30 * 86400, now - 30 * 86400))
+            paths = dict(reclaim.PATHS)
+            paths.update(claude_projects=root / "projects", codex_sessions=root / "none",
+                         codex_archived=root / "none2")
+            with mock.patch.object(reclaim, "PATHS", paths):
+                found = reclaim.conversation_image_candidates(14, reference_time=now)
+            self.assertEqual(found, [("claude", old)])
+
+
+class ExtrasFilesTests(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.root = Path(self.td.name)
+        self.now = 2_000_000_000
+        self.old = self.now - 20 * 86400
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def make(self, relative, data=b"x", old=True):
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        stamp = self.old if old else self.now
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def test_codex_work_only_takes_old_media_outside_outputs_and_git(self):
+        task = "ws/2026-09-01/tarea"
+        shot = self.make(f"{task}/work/captura.png")
+        video = self.make(f"{task}/work/render/borrador.mp4")
+        self.make(f"{task}/work/nuevo.png", old=False)
+        self.make(f"{task}/work/script.py")
+        self.make(f"{task}/outputs/final.png")
+        self.make(f"{task}/work/repo/.git/HEAD")
+        self.make(f"{task}/work/repo/docs/foto.png")
+        self.make("ws/2026-09-01/sin-entrega/work/entrega-real.mp4")
+        paths = dict(reclaim.PATHS)
+        paths["codex_workspace"] = self.root / "ws"
+        with mock.patch.object(reclaim, "PATHS", paths):
+            found = reclaim.codex_work_candidates(14, reference_time=self.now)
+        self.assertEqual(sorted(found), sorted([shot, video]))
+
+    def test_generated_images_go_only_when_an_identical_copy_exists(self):
+        copied = self.make("gen/a/copied.png", b"same bytes")
+        self.make("gen/a/unique.png", b"only here")
+        self.make("docs/proyecto/entrega.png", b"same bytes")
+        self.make("docs/proyecto/otra.png", b"different!")
+        work_copy = self.make("gen/b/work-only.png", b"copied to work")
+        self.make("docs/2026-09-01/tarea/work/borrador.png", b"copied to work")
+        paths = dict(reclaim.PATHS)
+        paths["codex_generated"] = self.root / "gen"
+        paths["codex_workspace"] = self.root / "docs"
+        with mock.patch.object(reclaim, "PATHS", paths):
+            found = reclaim.codex_generated_duplicates(
+                14, search_roots=[self.root / "docs"], reference_time=self.now)
+        self.assertEqual([g for g, _c in found], [copied])
+        self.assertTrue(work_copy.exists())
+
+    def test_old_versions_keep_current_and_newest(self):
+        versions = self.root / "versions"
+        for name in ("2.1.280", "2.1.281", "2.1.288", "2.1.290"):
+            self.make(f"versions/{name}")
+        link = self.root / "bin" / "claude"
+        link.parent.mkdir()
+        link.symlink_to(versions / "2.1.288")
+        releases = self.root / "releases"
+        for name in ("0.150.1-aarch64", "0.160.0-aarch64"):
+            self.make(f"releases/{name}/codex")
+        current = self.root / "current"
+        current.symlink_to(releases / "0.160.0-aarch64")
+        self.make("history/old-session/file@v1")
+        self.make("history/new-session/file@v1", old=False)
+        paths = dict(reclaim.PATHS)
+        paths.update(claude_cli_versions=versions, claude_cli_link=link,
+                     claude_desktop_code=self.root / "none", codex_releases=releases,
+                     codex_current=current, claude_file_history=self.root / "history",
+                     codex_sessions=self.root / "none", codex_archived=self.root / "none")
+        with mock.patch.object(reclaim, "PATHS", paths), \
+             mock.patch.object(reclaim, "_running_commands", return_value=[]), \
+             mock.patch.object(reclaim, "database_in_use", return_value=False):
+            found = {p.name for _label, p in
+                     reclaim.old_version_candidates(14, reference_time=self.now)}
+        self.assertEqual(found, {"2.1.280", "2.1.281", "0.150.1-aarch64", "old-session"})
+
+    def test_apply_extras_moves_to_trash_and_records_manifest(self):
+        task = "ws/2026-09-01/tarea"
+        shot = self.make(f"{task}/work/captura.png", b"png")
+        self.make(f"{task}/outputs/final.pdf")
+        args = argparse.Namespace(backup_dir=None, only="codex-work", include_media=False,
+                                  no_antigravity_steps=False, extras=False,
+                                  older_than=14, trash=True)
+        paths = dict(reclaim.PATHS)
+        paths.update(codex_workspace=self.root / "ws", codex_generated=self.root / "none")
+        trash = self.root / "Trash" / "reclaim"
+        with mock.patch.object(reclaim, "PATHS", paths), \
+             mock.patch.object(reclaim, "HOME", self.root), \
+             mock.patch.object(reclaim, "trash_root", return_value=trash), \
+             mock.patch.object(reclaim, "_cutoff", return_value=self.now - 14 * 86400), \
+             mock.patch.object(reclaim, "database_in_use", return_value=False), \
+             mock.patch.object(reclaim, "MANIFEST_DIR", self.root / "manifests"), \
+             redirect_stdout(io.StringIO()):
+            self.assertEqual(reclaim.apply(args), 0)
+        self.assertFalse(shot.exists())
+        self.assertTrue((trash / f"{task}/work/captura.png").exists())
+        manifest = next((self.root / "manifests").glob("manifest-*.jsonl"))
+        self.assertEqual(json.loads(manifest.read_text().splitlines()[0])["action"],
+                         "delete_work_media")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,14 +1,19 @@
 mod antigravity;
 mod claude;
 mod codex;
+mod codex_work;
 mod copilot;
 mod cursor;
+mod images;
 mod kiro;
 mod media;
+mod old_versions;
 mod opencode;
 mod trae;
 mod windsurf;
 mod zcode;
+
+pub(crate) use images::rewrite_without_images;
 
 use crate::engine::Action;
 use serde::Serialize;
@@ -46,6 +51,9 @@ pub fn registered_harnesses() -> Vec<Box<dyn Harness>> {
         Box::new(claude::Claude),
         Box::new(codex::Codex),
         Box::new(media::TemporaryMedia),
+        Box::new(images::ConversationImages),
+        Box::new(codex_work::CodexWork),
+        Box::new(old_versions::OldVersions),
         Box::new(opencode::OpenCode),
         Box::new(antigravity::Antigravity),
         Box::new(cursor::Cursor),
@@ -61,6 +69,18 @@ pub fn registered_harnesses() -> Vec<Box<dyn Harness>> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// Escaneo real de la carpeta del usuario (solo lee). Se corre a mano:
+    /// `cargo test real_home_scan -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn real_home_scan() {
+        let started = std::time::Instant::now();
+        let days = std::env::var("RECLAIM_DAYS").ok().and_then(|d| d.parse().ok());
+        let result = crate::engine::scan_storage(days).unwrap();
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+        println!("scan took {:?}", started.elapsed());
+    }
 
     #[test]
     fn registry_keys_are_unique_and_complete() {

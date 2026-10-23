@@ -1,6 +1,6 @@
 import type { ReactElement } from "react";
 import { SiClaude, SiCursor, SiGithubcopilot, SiGooglegemini, SiWindsurf } from "@icons-pack/react-simple-icons";
-import { Boxes, Image as ImageIcon } from "lucide-react";
+import { Archive, Boxes, FolderCog, Image as ImageIcon, MessageSquareX } from "lucide-react";
 
 type LogoProps = { size?: number; className?: string };
 
@@ -14,6 +14,18 @@ export function GeminiLogo({ size = 22, className }: LogoProps) {
 
 export function MediaLogo({ size = 22, className }: LogoProps) {
   return <ImageIcon aria-label="Temporary media" size={size} className={className} />;
+}
+
+export function ConversationImagesLogo({ size = 22, className }: LogoProps) {
+  return <MessageSquareX aria-label="Conversation images" size={size} className={className} />;
+}
+
+export function CodexWorkLogo({ size = 22, className }: LogoProps) {
+  return <FolderCog aria-label="Codex work files" size={size} className={className} />;
+}
+
+export function VersionsLogo({ size = 22, className }: LogoProps) {
+  return <Archive aria-label="Old versions" size={size} className={className} />;
 }
 
 export function CursorLogo({ size = 22, className }: LogoProps) {
@@ -68,6 +80,9 @@ const logos: Record<string, (props: LogoProps) => ReactElement> = {
   opencode: OpenCodeLogo,
   gemini: GeminiLogo,
   media: MediaLogo,
+  images: ConversationImagesLogo,
+  codexWork: CodexWorkLogo,
+  versions: VersionsLogo,
   cursor: CursorLogo,
   copilot: CopilotLogo,
   zcode: ZCodeLogo,

@@ -16,8 +16,8 @@ struct UpdateInfo {
 }
 
 #[tauri::command]
-fn scan_storage() -> Result<ScanResult, String> {
-    engine::scan_storage()
+fn scan_storage(older_than_days: Option<u64>) -> Result<ScanResult, String> {
+    engine::scan_storage(older_than_days)
 }
 
 #[tauri::command]

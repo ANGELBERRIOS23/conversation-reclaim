@@ -1,6 +1,6 @@
 [package]
 name = "conversation-reclaim"
-version = "3.7.0"
+version = "3.8.0"
 description = "Safely reclaim space used by AI conversation tools"
 authors = ["Angel Berrios <angel@aberrios.com>"]
 edition = "2021"
@@ -16,10 +16,11 @@ tauri-build = { version = "2", features = [] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs = "6"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 tauri = { version = "2", features = [] }
 tempfile = "3"
 walkdir = "2"
+zstd = "0.13"
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 tauri-plugin-updater = "2"
