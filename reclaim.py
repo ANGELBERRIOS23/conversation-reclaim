@@ -2082,11 +2082,60 @@ def strip_session_images(data, tool):
     return b"\n".join(lines), removed
 
 
+def _codex_thread_id(path):
+    name = Path(path).name
+    for suffix in (".zst", ".jsonl"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+    parts = name.split("-")
+    return "-".join(parts[-5:]) if len(parts) >= 5 else None
+
+
+def _codex_history_dbs():
+    return sorted(PATHS["codex_sessions"].parent.glob("thread_history_*.sqlite"))
+
+
+def codex_projection_rows(thread):
+    """[(base, posición, ordinal)] de las bases de historial de Codex que leen
+    esta sesión. Codex guarda hasta qué byte del archivo ya leyó; si el
+    archivo se achica, esa posición hay que moverla también."""
+    rows = []
+    for db in _codex_history_dbs():
+        try:
+            with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as con:
+                row = con.execute(
+                    "SELECT next_rollout_byte_offset, next_rollout_ordinal "
+                    "FROM thread_history_projection_state WHERE thread_id=?", (thread,)).fetchone()
+        except sqlite3.Error:
+            row = (None, None)
+        if row:
+            rows.append((db, row[0], row[1]))
+    return rows
+
+
+def _ordinal_offset(data, next_ordinal):
+    """Byte donde empieza la primera línea con ordinal >= next_ordinal, o el
+    final si ya se leyó todo. Las líneas conservan su ordinal al limpiarlas."""
+    offset = 0
+    for raw in data.split(b"\n"):
+        if raw.strip():
+            try:
+                ordinal = json.loads(raw).get("ordinal")
+            except (ValueError, AttributeError):
+                ordinal = None
+            if isinstance(ordinal, int) and ordinal >= next_ordinal:
+                return offset
+        offset += len(raw) + 1
+    return len(data)
+
+
 def rewrite_session_without_images(path, tool, trash=None):
     """Reescribe una sesión sin imágenes de forma atómica.
 
     Devuelve (bytes_liberados_en_disco, hecho, error). Con `trash`, el
-    original se guarda ahí antes de reemplazarlo.
+    original se guarda ahí antes de reemplazarlo. En Codex también mueve la
+    posición de lectura de su base de historial; si Codex está abierto, la
+    sesión se omite.
     """
     path = Path(path)
     try:
@@ -2103,6 +2152,13 @@ def rewrite_session_without_images(path, tool, trash=None):
         return 0, False, removed
     if not removed:
         return 0, False, None
+    thread = _codex_thread_id(path) if tool == "codex" else None
+    projections = codex_projection_rows(thread) if thread else []
+    for db, offset, ordinal in projections:
+        if offset is None or not isinstance(ordinal, int):
+            return 0, False, "no se pudo leer la base de historial de Codex"
+        if database_in_use(db) is not False:
+            return 0, False, "Codex está abierto: ciérralo para limpiar este chat"
     compressed = path.name.endswith(".zst")
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.",
                                     suffix=".reclaim-tmp")
@@ -2130,8 +2186,23 @@ def rewrite_session_without_images(path, tool, trash=None):
             keep = _trash_destination(trash, path)
             shutil.copy2(path, keep)
         after = tmp.stat().st_size
+        original = path.with_name(f".{path.name}.reclaim-orig")
+        if projections:
+            os.link(str(path), str(original))
         os.replace(str(tmp), str(path))
-    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        if projections:
+            try:
+                for db, offset, ordinal in projections:
+                    with closing(sqlite3.connect(str(db))) as con, con:
+                        con.execute(
+                            "UPDATE thread_history_projection_state SET next_rollout_byte_offset=? "
+                            "WHERE thread_id=? AND next_rollout_byte_offset=?",
+                            (_ordinal_offset(new, ordinal), thread, offset))
+            except sqlite3.Error as exc:
+                os.replace(str(original), str(path))
+                raise RuntimeError(f"no se pudo ajustar la base de Codex: {exc}")
+            original.unlink()
+    except (OSError, RuntimeError, subprocess.SubprocessError, sqlite3.Error) as exc:
         return 0, False, str(exc)
     finally:
         if tmp.exists():

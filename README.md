@@ -232,6 +232,13 @@ Two more differences with OpenCode 2:
   rewritten chat, so nothing is lost until you empty it. Cowork sessions are
   never rewritten: each line carries a signature (`_audit_hmac`) that would
   stop matching.
+- Codex remembers how far it has read each session in
+  `~/.codex/thread_history_*.sqlite` (`thread_history_projection_state`).
+  When the images extra shrinks a Codex session, that read position is moved
+  to the same line in the smaller file (lines keep their `ordinal`), so a
+  resumed chat keeps showing new messages. **Close Codex first:** while its
+  history database is open, those chats are skipped. If the database update
+  fails, the original session file is put back.
 
 ### Repair rollouts damaged by earlier versions
 

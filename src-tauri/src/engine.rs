@@ -148,7 +148,7 @@ pub(crate) fn collect_files(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn file_is_active(path: &Path) -> bool {
+pub(crate) fn file_is_active(path: &Path) -> bool {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::fs::OpenOptionsExt;

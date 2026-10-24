@@ -20,6 +20,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 tauri = { version = "2", features = ["protocol-asset"] }
 tempfile = "3"
 walkdir = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
 trash = "5"
 zstd = "0.13"
 

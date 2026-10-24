@@ -1,5 +1,5 @@
 use super::{Harness, HarnessMetadata};
-use crate::engine::{collect_files, is_older_than_cutoff, Action};
+use crate::engine::{collect_files, file_is_active, is_older_than_cutoff, Action};
 use serde_json::{json, Map, Value};
 use std::fs::{self, File, FileTimes};
 use std::io::Write;
@@ -215,7 +215,70 @@ fn tool_for(path: &Path) -> Option<Tool> {
     }
 }
 
+fn codex_thread_id(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy();
+    let name = name.trim_end_matches(".zst").trim_end_matches(".jsonl");
+    let parts: Vec<&str> = name.split('-').collect();
+    (parts.len() >= 5).then(|| parts[parts.len() - 5..].join("-"))
+}
+
+/// Bases de historial de Codex (`~/.codex/thread_history_*.sqlite`).
+fn codex_history_dbs(session: &Path) -> Vec<PathBuf> {
+    let Some(codex) = session.ancestors().find(|a| a.file_name().is_some_and(|n| n == ".codex")) else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(codex) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            name.starts_with("thread_history_") && name.ends_with(".sqlite")
+        })
+        .collect()
+}
+
+/// Codex guarda hasta qué byte de cada sesión ya leyó. Si el archivo se
+/// achica, esa posición hay que moverla también: (base, posición, ordinal).
+fn codex_projections(session: &Path, thread: &str) -> Result<Vec<(PathBuf, i64, i64)>, String> {
+    let mut rows = Vec::new();
+    for db in codex_history_dbs(session) {
+        let con = rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("Codex history database: {e}"))?;
+        let row = con.query_row(
+            "SELECT next_rollout_byte_offset, next_rollout_ordinal FROM thread_history_projection_state WHERE thread_id = ?1",
+            [thread],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        );
+        match row {
+            Ok((offset, ordinal)) => rows.push((db, offset, ordinal)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(error) => return Err(format!("Codex history database: {error}")),
+        }
+    }
+    Ok(rows)
+}
+
+/// Byte donde empieza la primera línea con `ordinal >= next`, o el final.
+/// Las líneas conservan su ordinal al limpiarlas.
+fn ordinal_offset(data: &[u8], next: i64) -> i64 {
+    let mut offset = 0usize;
+    for line in data.split(|b| *b == b'\n') {
+        if let Ok(record) = serde_json::from_slice::<Value>(line) {
+            if record.get("ordinal").and_then(Value::as_i64).is_some_and(|o| o >= next) {
+                return offset as i64;
+            }
+        }
+        offset += line.len() + 1;
+    }
+    data.len() as i64
+}
+
 /// Reescribe una sesión sin imágenes de forma atómica y conserva su fecha.
+/// En Codex también mueve la posición de lectura de su base de historial; si
+/// Codex está abierto, la sesión no se toca.
 /// Devuelve los bytes liberados en disco.
 pub(crate) fn rewrite_without_images(path: &Path) -> Result<u64, String> {
     let tool = tool_for(path).ok_or("unknown conversation tool")?;
@@ -227,6 +290,14 @@ pub(crate) fn rewrite_without_images(path: &Path) -> Result<u64, String> {
     let (new, removed) = strip_session(&data, tool)?;
     if removed == 0 {
         return Err("no images left to remove".into());
+    }
+    let thread = if tool == Tool::Codex { codex_thread_id(path) } else { None };
+    let projections = match &thread {
+        Some(thread) => codex_projections(path, thread)?,
+        None => Vec::new(),
+    };
+    if projections.iter().any(|(db, _, _)| file_is_active(db)) {
+        return Err("Codex is open: close it to clean this chat".into());
     }
     let bytes = if is_compressed(path) {
         zstd::stream::encode_all(&new[..], 3).map_err(|e| e.to_string())?
@@ -254,7 +325,28 @@ pub(crate) fn rewrite_without_images(path: &Path) -> Result<u64, String> {
     if current.len() != before.len() || current.modified().ok() != before.modified().ok() {
         return Err("file changed during cleanup".into());
     }
+    let original = path.with_file_name(format!(".{}.reclaim-orig", path.file_name().unwrap_or_default().to_string_lossy()));
+    if !projections.is_empty() {
+        fs::hard_link(path, &original).map_err(|e| e.to_string())?;
+    }
     temp.persist(path).map_err(|e| e.error.to_string())?;
+    if let Some(thread) = &thread {
+        let update = projections.iter().try_for_each(|(db, offset, ordinal)| {
+            let con = rusqlite::Connection::open(db)?;
+            con.execute(
+                "UPDATE thread_history_projection_state SET next_rollout_byte_offset = ?1 WHERE thread_id = ?2 AND next_rollout_byte_offset = ?3",
+                rusqlite::params![ordinal_offset(&new, *ordinal), thread, offset],
+            )
+            .map(|_| ())
+        });
+        if let Err(error) = update {
+            let _ = fs::rename(&original, path);
+            return Err(format!("could not update Codex history: {error}"));
+        }
+    }
+    if !projections.is_empty() {
+        let _ = fs::remove_file(&original);
+    }
     Ok(before.len().saturating_sub(bytes.len() as u64))
 }
 
@@ -399,6 +491,44 @@ mod tests {
         assert!(text.contains(PLACEHOLDER));
         assert!(!text.contains(&big()));
         assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), old);
+    }
+
+    fn codex_home(next_ordinal: i64) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join(".codex/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let thread = "01a0aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee";
+        let path = sessions.join(format!("rollout-2026-09-01T10-00-00-{thread}.jsonl"));
+        let body = format!(
+            "{}\n{}\n{}\n",
+            json!({"ordinal": 0, "type": "session_meta", "payload": {}}),
+            json!({"ordinal": 1, "payload": {"content": [{"type": "input_image", "image_url": format!("data:image/png;base64,{}", big())}]}}),
+            json!({"ordinal": 2, "payload": {"text": "hola"}})
+        );
+        fs::write(&path, &body).unwrap();
+        let db = temp.path().join(".codex/thread_history_1.sqlite");
+        let con = rusqlite::Connection::open(&db).unwrap();
+        con.execute_batch("CREATE TABLE thread_history_projection_state (thread_id TEXT PRIMARY KEY, next_rollout_byte_offset INTEGER NOT NULL, next_rollout_ordinal INTEGER NOT NULL)").unwrap();
+        con.execute("INSERT INTO thread_history_projection_state VALUES (?1, ?2, ?3)", rusqlite::params![thread, body.len() as i64, next_ordinal]).unwrap();
+        (temp, path, db)
+    }
+
+    #[test]
+    fn codex_read_position_moves_with_the_smaller_file() {
+        for next in [3, 2] {
+            let (_temp, path, db) = codex_home(next);
+            rewrite_without_images(&path).unwrap();
+            let new = fs::read(&path).unwrap();
+            let offset: i64 = rusqlite::Connection::open(&db).unwrap()
+                .query_row("select next_rollout_byte_offset from thread_history_projection_state", [], |r| r.get(0)).unwrap();
+            if next == 3 {
+                assert_eq!(offset as usize, new.len());
+            } else {
+                let line = new[offset as usize..].split(|b| *b == b'\n').next().unwrap();
+                assert_eq!(serde_json::from_slice::<Value>(line).unwrap()["ordinal"], 2);
+            }
+            assert!(!path.parent().unwrap().read_dir().unwrap().any(|e| e.unwrap().file_name().to_string_lossy().ends_with(".reclaim-orig")));
+        }
     }
 
     #[test]

@@ -239,6 +239,13 @@ Otras dos diferencias con OpenCode 2:
   reescribe, así que no se pierde nada hasta vaciarla. Las sesiones de Cowork
   nunca se reescriben: cada línea lleva una firma (`_audit_hmac`) que dejaría
   de cuadrar.
+- Codex recuerda hasta dónde leyó cada sesión en
+  `~/.codex/thread_history_*.sqlite` (`thread_history_projection_state`).
+  Cuando el extra de imágenes achica una sesión de Codex, esa posición se mueve
+  a la misma línea en el archivo más chico (las líneas conservan su
+  `ordinal`), así un chat retomado sigue mostrando los mensajes nuevos.
+  **Cierra Codex antes:** mientras su base de historial está abierta, esos
+  chats se omiten. Si falla el ajuste de la base, se regresa el archivo original.
 
 ### Reparar rollouts dañados por versiones anteriores
 

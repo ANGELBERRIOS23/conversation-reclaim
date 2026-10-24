@@ -697,6 +697,54 @@ class ExtrasImageTests(unittest.TestCase):
             self.assertIn(reclaim.IMAGE_PLACEHOLDER, text)
             self.assertNotIn(BIG, text)
 
+    def codex_home(self, root, next_ordinal):
+        sessions = root / ".codex" / "sessions"
+        sessions.mkdir(parents=True)
+        thread = "01a0aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee"
+        path = sessions / f"rollout-2026-09-01T10-00-00-{thread}.jsonl"
+        lines = [json.dumps({"ordinal": 0, "type": "session_meta", "payload": {}}),
+                 json.dumps({"ordinal": 1, "payload": {"content": [
+                     {"type": "input_image", "image_url": "data:image/png;base64," + BIG}]}}),
+                 json.dumps({"ordinal": 2, "payload": {"text": "hola"}})]
+        path.write_bytes(("\n".join(lines) + "\n").encode())
+        db = root / ".codex" / "thread_history_1.sqlite"
+        with closing_db(db) as con:
+            con.execute("CREATE TABLE thread_history_projection_state (thread_id TEXT PRIMARY KEY, "
+                        "next_rollout_byte_offset INTEGER NOT NULL, next_rollout_ordinal INTEGER NOT NULL)")
+            con.execute("INSERT INTO thread_history_projection_state VALUES (?, ?, ?)",
+                        (thread, path.stat().st_size, next_ordinal))
+        paths = dict(reclaim.PATHS)
+        paths["codex_sessions"] = sessions
+        return path, db, thread, paths
+
+    def test_codex_read_position_moves_with_the_smaller_file(self):
+        for next_ordinal, expect in ((3, "end"), (2, "line2")):
+            with tempfile.TemporaryDirectory() as td:
+                path, db, thread, paths = self.codex_home(Path(td), next_ordinal)
+                with mock.patch.object(reclaim, "PATHS", paths), \
+                     mock.patch.object(reclaim, "database_in_use", return_value=False):
+                    cut, done, error = reclaim.rewrite_session_without_images(path, "codex")
+                self.assertIsNone(error)
+                new = path.read_bytes()
+                offset = sqlite3.connect(str(db)).execute(
+                    "select next_rollout_byte_offset from thread_history_projection_state").fetchone()[0]
+                if expect == "end":
+                    self.assertEqual(offset, len(new))
+                else:
+                    self.assertEqual(json.loads(new[offset:].split(b"\n")[0])["ordinal"], 2)
+                self.assertFalse(any(p.name.endswith(".reclaim-orig") for p in path.parent.iterdir()))
+
+    def test_codex_open_means_the_session_is_skipped(self):
+        with tempfile.TemporaryDirectory() as td:
+            path, db, thread, paths = self.codex_home(Path(td), 3)
+            before = path.read_bytes()
+            with mock.patch.object(reclaim, "PATHS", paths), \
+                 mock.patch.object(reclaim, "database_in_use", return_value=True):
+                cut, done, error = reclaim.rewrite_session_without_images(path, "codex")
+            self.assertFalse(done)
+            self.assertIn("Codex", error)
+            self.assertEqual(path.read_bytes(), before)
+
     def test_candidates_respect_age_and_skip_other_files(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
