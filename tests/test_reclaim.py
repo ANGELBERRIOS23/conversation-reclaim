@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -906,6 +907,71 @@ class OpenListedTests(OutputsFixture):
         self.assertEqual(run.call_args_list[0].args[0], ["open", str(video)])
         self.assertEqual(run.call_args_list[1].args[0], ["open", "-R", str(video)])
         self.assertEqual(run.call_count, 2)
+
+
+class OrphanTests(OutputsFixture):
+    def setUp(self):
+        super().setUp()
+        self.paths["codex_sessions"] = self.root / ".codex" / "sessions"
+        self.paths["codex_archived"] = self.root / ".codex" / "archived_sessions"
+
+    def session(self, relative, cwd):
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": str(cwd)}}) + "\n")
+
+    def age(self, relative, days=10):
+        stamp = time.time() - days * 86400
+        for current, _dirs, files in os.walk(self.root / relative):
+            for name in files:
+                os.utime(os.path.join(current, name), (stamp, stamp))
+
+    def orphans(self):
+        with mock.patch.object(reclaim, "PATHS", self.paths), \
+             mock.patch.object(reclaim, "HOME", self.root):
+            return [str(p.relative_to(self.ws)) for p in reclaim.codex_orphan_dirs()]
+
+    def test_only_old_dated_folders_without_session_are_orphans(self):
+        self.make("Documents/Codex/2026-09-01/alive/outputs/a.mp4", 20)
+        self.make("Documents/Codex/2026-09-01/archived/work/b.png", 20)
+        self.make("Documents/Codex/2026-09-01/gone/outputs/c.mp4", 20)
+        self.make("Documents/Codex/2026-09-02/gone-today/outputs/d.mp4", 20)
+        self.make("Documents/Codex/integraciones/tool/x.txt", 20)
+        self.session(".codex/sessions/2026/09/01/rollout-1.jsonl", self.ws / "2026-09-01/alive/work")
+        self.session(".codex/archived_sessions/rollout-2.jsonl", self.ws / "2026-09-01/archived")
+        for folder in ("Documents/Codex/2026-09-01", "Documents/Codex/integraciones"):
+            self.age(folder)
+        self.assertEqual(self.orphans(), ["2026-09-01/gone"])
+
+    def test_nothing_is_orphan_when_a_session_cannot_be_read(self):
+        self.make("Documents/Codex/2026-09-01/gone/outputs/c.mp4", 20)
+        self.age("Documents/Codex/2026-09-01")
+        self.assertEqual(self.orphans(), [], "no sessions at all")
+        broken = self.root / ".codex/sessions/rollout-broken.jsonl"
+        broken.parent.mkdir(parents=True, exist_ok=True)
+        broken.write_text("not json\n")
+        self.assertEqual(self.orphans(), [])
+
+    def test_outputs_from_deleted_chats_are_marked_and_folders_go_to_trash(self):
+        gone = self.make("Documents/Codex/2026-09-01/gone/outputs/c.mp4", 20)
+        alive = self.make("Documents/Codex/2026-09-01/alive/outputs/a.mp4", 20)
+        self.session(".codex/sessions/rollout-1.jsonl", self.ws / "2026-09-01/alive")
+        self.age("Documents/Codex/2026-09-01")
+        items = {i["path"]: i for i in self.listing(find_copies=False)}
+        self.assertTrue(items[gone]["orphan"])
+        self.assertFalse(items[alive]["orphan"])
+        trash = self.root / ".Trash" / "reclaim"
+        with mock.patch.object(reclaim, "PATHS", self.paths), \
+             mock.patch.object(reclaim, "HOME", self.root), \
+             mock.patch.object(reclaim, "trash_root", return_value=trash), \
+             mock.patch.object(reclaim, "MANIFEST_DIR", self.root / "manifests"), \
+             redirect_stdout(io.StringIO()):
+            folders = reclaim.codex_orphan_list()
+            self.assertEqual([f["task"] for f in folders], ["2026-09-01/gone"])
+            self.assertEqual(reclaim.trash_outputs(folders, ["1"], action="trash_orphan_folder"), 0)
+        self.assertFalse((self.ws / "2026-09-01/gone").exists())
+        self.assertTrue(alive.exists())
+        self.assertTrue((trash / "Documents/Codex/2026-09-01/gone/outputs/c.mp4").exists())
 
 
 class GeneratedListTests(OutputsFixture):

@@ -177,3 +177,5 @@ h1 { max-width: 710px; font-size: clamp(34px, 4.2vw, 55px); line-height: 1.04; l
 .output-badge.none { color: var(--muted); background: rgba(30,43,56,.06); font-weight: 500; }
 .preview-media img { width: auto; height: auto; }
 @media (prefers-color-scheme: dark) { .output-badge.none { background: rgba(255,255,255,.06); } }
+.output-badge.orphan { color: #b45309; background: #fff1dc; }
+@media (prefers-color-scheme: dark) { .output-badge.orphan { color: #fbbf77; background: #3d2c17; } }

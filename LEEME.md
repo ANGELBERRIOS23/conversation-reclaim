@@ -103,6 +103,8 @@ python3 reclaim.py outputs --external /Volumes/DISCO  # busca copias también en
 python3 reclaim.py generated                  # imágenes generadas por Codex; primero las recomendadas (ya copiadas)
 python3 reclaim.py generated --to-trash 1 2   # manda a la Papelera solo las imágenes que elijas
 python3 reclaim.py outputs --open 3           # abre el 3 con su app (--reveal 3 lo muestra en Finder)
+python3 reclaim.py orphans                    # carpetas de tareas de Codex cuyo chat se eliminó
+python3 reclaim.py orphans --to-trash 1 2     # manda esas carpetas completas a la Papelera
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO   # poda opencode.db (opencode cerrado; respaldo obligatorio o --no-backup)
 python3 reclaim.py apply-db --no-backup --close-opencode  # avisa, cierra OpenCode normalmente y poda
 python3 reclaim.py apply-db --backup-dir /Volumes/DISCO --drop-v1-copy  # OpenCode 2: borra también la copia vieja de OpenCode 1
@@ -226,6 +228,11 @@ Otras dos diferencias con OpenCode 2:
   (la app solo puede leer esa carpeta para mostrarlas). Cada archivo de las dos
   listas se puede ver dentro de la app (imágenes, video y audio), abrir con su
   app o mostrar en Finder/Explorador antes de decidir.
+- `orphans` lista las carpetas `~/Documents/Codex/<fecha>/<tarea>` cuya
+  conversación de Codex ya no existe (ninguna sesión activa ni archivada
+  trabaja en ella) y que no tienen archivos cambiados en los últimos 2 días. Si
+  alguna sesión no se puede leer, no se marca ninguna. En la app salen en la
+  pestaña **Chats eliminados** y sus outputs llevan la etiqueta **Chat eliminado**.
 - Los extras vienen **desmarcados** y solo tocan lo que no cambió en N días
   (`--older-than`, 14 por defecto; la app tiene el mismo ajuste). Con
   `--trash` todo va a la Papelera, incluido el original de cada chat que se

@@ -48,7 +48,7 @@ from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home()
-VERSION = "3.9.1"
+VERSION = "3.10.0"
 MANIFEST_DIR = HOME / ".conversation-reclaim"
 TRANSIENT_MEDIA_MIN_AGE = 7 * 24 * 60 * 60
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -2636,6 +2636,9 @@ def codex_outputs(min_bytes=None, find_copies=True, extra_roots=()):
             skip_dir=lambda d: d == workspace or workspace in d.parents)
         for item in items:
             item["copy"] = copies.get(item["path"])
+    orphans = set(codex_orphan_dirs()) if items else set()
+    for item in items:
+        item["orphan"] = _task_dir(item["path"], workspace) in orphans
     items.sort(key=lambda i: (-i["size"], str(i["path"])))
     return items
 
@@ -2652,13 +2655,133 @@ def print_outputs(items, limit):
     print()
     for number, item in enumerate(items[:limit], 1):
         note = ""
+        if item.get("orphan"):
+            note = "  [chat eliminado]"
         if item["copy"]:
-            note = f"  [copia en {str(item['copy']).replace(str(HOME), '~')}]"
+            note += f"  [copia en {str(item['copy']).replace(str(HOME), '~')}]"
         elif item["newer"]:
-            note = f"  [hay versión más nueva: {item['newer'].name}]"
+            note += f"  [hay versión más nueva: {item['newer'].name}]"
         date = datetime.fromtimestamp(item["mtime"]).strftime("%Y-%m-%d")
         print(f"{number:>4}. {human(item['size']):>9}  {date}  "
               f"{item['path'].relative_to(workspace)}{note}")
+    if len(items) > limit:
+        print(f"  … y {len(items) - limit} más (usa --limit)")
+
+
+ORPHAN_IDLE_DAYS = 2
+_DATED = re.compile(r"\d{4}-\d{2}-\d{2}$")
+
+
+def _task_dir(path, workspace):
+    """<espacio>/<fecha>/<tarea> de una ruta dentro del espacio de Codex."""
+    try:
+        parts = Path(path).relative_to(workspace).parts
+    except ValueError:
+        return None
+    return workspace / parts[0] / parts[1] if len(parts) >= 2 else None
+
+
+def _session_first_line(path):
+    if path.name.endswith(".zst"):
+        zstd = _zstd()
+        if not zstd:
+            return None
+        proc = subprocess.Popen([zstd, "-dcq", "--", str(path)], stdout=subprocess.PIPE)
+        try:
+            return proc.stdout.readline()
+        finally:
+            proc.kill()
+            proc.wait()
+    with open(path, "rb") as fh:
+        return fh.readline()
+
+
+def codex_live_task_dirs():
+    """Carpetas de tareas que todavía tienen una conversación de Codex (activa
+    o archivada), según la carpeta de trabajo que guarda cada sesión.
+
+    None si alguna sesión no se pudo leer o no hay ninguna: así no se marca
+    como huérfano algo que quizá sigue vivo.
+    """
+    workspace = PATHS["codex_workspace"]
+    live = set()
+    sessions = 0
+    for root in (PATHS["codex_sessions"], PATHS["codex_archived"]):
+        if not root.is_dir():
+            continue
+        for path in root.rglob("rollout-*"):
+            if not (path.name.endswith(".jsonl") or path.name.endswith(".jsonl.zst")):
+                continue
+            try:
+                meta = json.loads(_session_first_line(path) or b"")
+            except (OSError, ValueError):
+                return None
+            sessions += 1
+            cwd = (meta.get("payload") or {}).get("cwd") if isinstance(meta, dict) else None
+            task = _task_dir(cwd, workspace) if cwd else None
+            if task:
+                live.add(task)
+    return live if sessions else None
+
+
+def codex_orphan_dirs(idle_days=ORPHAN_IDLE_DAYS, reference_time=None):
+    """Carpetas <fecha>/<tarea> sin conversación y sin archivos nuevos en idle_days.
+
+    Solo cuenta la fecha de los archivos: la de una carpeta cambia también
+    cuando se le quitan cosas, y eso no es actividad.
+    """
+    live = codex_live_task_dirs()
+    if live is None:
+        return []
+    workspace = PATHS["codex_workspace"]
+    cutoff = _cutoff(idle_days, reference_time)
+    found = []
+    if not workspace.is_dir():
+        return found
+    for day in sorted(workspace.iterdir()):
+        if not day.is_dir() or day.is_symlink() or not _DATED.match(day.name):
+            continue
+        for task in sorted(day.iterdir()):
+            if not task.is_dir() or task.is_symlink() or task in live:
+                continue
+            recent = False
+            for current, _dirs, files in os.walk(task):
+                for name in files:
+                    try:
+                        if os.lstat(os.path.join(current, name)).st_mtime >= cutoff:
+                            recent = True
+                            break
+                    except OSError:
+                        continue
+                if recent:
+                    break
+            if not recent:
+                found.append(task)
+    return found
+
+
+def codex_orphan_list():
+    items = []
+    for task in codex_orphan_dirs():
+        files = [Path(c) / n for c, _d, names in os.walk(task) for n in names]
+        items.append({"path": task, "size": sum(file_size(f) for f in files),
+                      "mtime": task.stat().st_mtime, "files": len(files),
+                      "task": "/".join(task.relative_to(PATHS["codex_workspace"]).parts),
+                      "git": any((Path(c) / ".git").exists() for c, _d, _n in os.walk(task)),
+                      "copy": None, "newer": None})
+    items.sort(key=lambda i: (-i["size"], str(i["path"])))
+    return items
+
+
+def print_orphans(items, limit):
+    print(f"Carpetas de chats de Codex eliminados: {len(items)}, "
+          f"{human(sum(i['size'] for i in items))}")
+    print("  Su conversación ya no existe en Codex (ni activa ni archivada). Se recomienda")
+    print("  borrarlas. Para mandarlas completas a la Papelera: reclaim.py orphans --to-trash <número> ...")
+    print()
+    for number, item in enumerate(items[:limit], 1):
+        git = "  [tiene un repositorio git]" if item["git"] else ""
+        print(f"{number:>4}. {human(item['size']):>9}  {item['files']:>5} archivos  {item['task']}{git}")
     if len(items) > limit:
         print(f"  … y {len(items) - limit} más (usa --limit)")
 
@@ -2879,7 +3002,7 @@ def restore(backup_dir):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="conversation-reclaim v" + VERSION)
     ap.add_argument("mode", nargs="?", default="scan",
-                    choices=["scan", "apply", "apply-db", "restore", "skills", "outputs", "generated"])
+                    choices=["scan", "apply", "apply-db", "restore", "skills", "outputs", "generated", "orphans"])
     ap.add_argument("--limit", type=int, default=40,
                     help="outputs/generated: cuántos archivos mostrar (por defecto 40)")
     ap.add_argument("--external", action="append", default=[], metavar="CARPETA",
@@ -2939,6 +3062,14 @@ def main(argv=None):
         if args.trash_items:
             return trash_outputs(items, args.trash_items)
         print_outputs(items, args.limit)
+        return 0
+    elif args.mode == "orphans":
+        items = codex_orphan_list()
+        if args.reveal:
+            return open_listed(items, args.reveal, reveal=True)
+        if args.trash_items:
+            return trash_outputs(items, args.trash_items, action="trash_orphan_folder")
+        print_orphans(items, args.limit)
         return 0
     elif args.mode == "generated":
         items = codex_generated_list(find_copies=not (args.no_copies or args.open or args.reveal))

@@ -50,7 +50,19 @@ type OutputItem = {
   modified: string;
   copyPath: string | null;
   newerVersion: string | null;
+  orphan?: boolean;
 };
+
+type OrphanFolder = {
+  path: string;
+  name: string;
+  bytes: number;
+  files: number;
+  modified: string;
+  hasGit: boolean;
+};
+
+type LargeTab = "outputs" | "images" | "orphans";
 
 type GeneratedImage = {
   path: string;
@@ -166,6 +178,16 @@ const copy = {
     clearSelection: "Quitar selección",
     selectAll: "Seleccionar todo",
     noCopy: "Sin copia en otro lado",
+    tabOrphans: "Chats eliminados",
+    orphansTitle: "Carpetas de chats eliminados",
+    orphansBody: "Carpetas de ~/Documents/Codex cuya conversación ya no existe en Codex, ni activa ni archivada. Se recomienda borrarlas: van completas a la Papelera.",
+    orphansHint: "Compara cada carpeta con las conversaciones de Codex. Solo cuenta carpetas sin cambios en los últimos 2 días.",
+    orphansEmpty: "No hay carpetas de chats eliminados.",
+    orphansFound: "carpetas",
+    orphanBadge: "Chat eliminado",
+    selectOrphans: "Marcar los de chats eliminados",
+    filesLabel: "archivos",
+    hasGit: "tiene un repositorio git",
     moveToTrash: "Mover a la Papelera",
     moving: "Moviendo…",
     trashConfirmTitle: "¿Mover a la Papelera?",
@@ -283,6 +305,16 @@ const copy = {
     clearSelection: "Clear selection",
     selectAll: "Select all",
     noCopy: "No copy elsewhere",
+    tabOrphans: "Deleted chats",
+    orphansTitle: "Folders of deleted chats",
+    orphansBody: "Folders in ~/Documents/Codex whose conversation no longer exists in Codex, active or archived. Removing them is recommended: whole folders go to the Trash.",
+    orphansHint: "Compares each folder with your Codex conversations. Only folders unchanged in the last 2 days count.",
+    orphansEmpty: "No folders from deleted chats.",
+    orphansFound: "folders",
+    orphanBadge: "Deleted chat",
+    selectOrphans: "Select those from deleted chats",
+    filesLabel: "files",
+    hasGit: "has a git repository",
     moveToTrash: "Move to Trash",
     moving: "Moving…",
     trashConfirmTitle: "Move to Trash?",
@@ -345,10 +377,15 @@ function isTauri() {
   return "__TAURI_INTERNALS__" in window;
 }
 
+const demoOrphans: OrphanFolder[] = [
+  { path: "/demo/Documents/Codex/2026-10-08/pue", name: "2026-10-08/pue", bytes: 140_652_261, files: 101, modified: "2026-10-08", hasGit: false },
+  { path: "/demo/Documents/Codex/2026-08-06/h", name: "2026-08-06/h", bytes: 116_380_274, files: 2880, modified: "2026-08-06", hasGit: true },
+];
+
 const demoOutputs: OutputItem[] = [
   { path: "/demo/Documents/Codex/2026-10-06/mira/outputs/Audio 19 - cruce.wav", name: "Audio 19 - cruce.wav", task: "2026-10-06/mira", bytes: 301_056_000, modified: "2026-10-06", copyPath: null, newerVersion: null },
   { path: "/demo/Documents/Codex/2026-10-06/mira/outputs/C0027 - color y ruido.mov", name: "C0027 - color y ruido.mov", task: "2026-10-06/mira", bytes: 200_015_872, modified: "2026-10-06", copyPath: "/demo/Movies/C0027 - color y ruido.mov", newerVersion: null },
-  { path: "/demo/Documents/Codex/2026-09-02/q/outputs/Marketing_v1.zip", name: "Marketing_v1.zip", task: "2026-09-02/q", bytes: 147_324_928, modified: "2026-09-02", copyPath: null, newerVersion: "Marketing_v2.zip" },
+  { path: "/demo/Documents/Codex/2026-09-02/q/outputs/Marketing_v1.zip", name: "Marketing_v1.zip", task: "2026-09-02/q", bytes: 147_324_928, modified: "2026-09-02", copyPath: null, newerVersion: "Marketing_v2.zip", orphan: true },
 ];
 
 const demoTile = (hue: number) => `data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' width='1024' height='1024'><rect width='1024' height='1024' fill='hsl(${hue} 55% 82%)'/><circle cx='512' cy='512' r='260' fill='hsl(${hue} 50% 60%)'/></svg>`)}`;
@@ -402,8 +439,9 @@ export default function App() {
   const [updateError, setUpdateError] = useState("");
   const [ageDays, setAgeDays] = useState(savedAgeDays);
   const [outputs, setOutputs] = useState<OutputItem[] | null>(null);
-  const [largeTab, setLargeTab] = useState<"outputs" | "images">("outputs");
+  const [largeTab, setLargeTab] = useState<LargeTab>("outputs");
   const [images, setImages] = useState<GeneratedImage[] | null>(null);
+  const [orphans, setOrphans] = useState<OrphanFolder[] | null>(null);
   const [outputsBusy, setOutputsBusy] = useState<"search" | "trash" | null>(null);
   const [pickedOutputs, setPickedOutputs] = useState<Set<string>>(new Set());
   const [trashModal, setTrashModal] = useState<"confirm" | "done" | null>(null);
@@ -512,9 +550,13 @@ export default function App() {
         const found = isTauri() ? await invoke<OutputItem[]>("list_large_outputs") : demoOutputs;
         setOutputs(found);
         items = found;
-      } else {
+      } else if (tab === "images") {
         const found = isTauri() ? await invoke<GeneratedImage[]>("list_generated_images") : demoImages;
         setImages(found);
+        items = found;
+      } else {
+        const found = isTauri() ? await invoke<OrphanFolder[]>("list_orphan_folders") : demoOrphans;
+        setOrphans(found);
         items = found;
       }
       setPickedOutputs((previous) => new Set([...previous].filter((path) => items.some((item) => item.path === path))));
@@ -532,7 +574,9 @@ export default function App() {
     return next;
   });
 
-  const activeList: { path: string; bytes: number; copyPath: string | null }[] = (largeTab === "outputs" ? outputs : images) ?? [];
+  const activeList: { path: string; bytes: number; copyPath: string | null }[] = largeTab === "orphans"
+    ? (orphans ?? []).map((item) => ({ path: item.path, bytes: item.bytes, copyPath: null }))
+    : (largeTab === "outputs" ? outputs : images) ?? [];
   const pickedBytes = activeList.filter((item) => pickedOutputs.has(item.path)).reduce((sum, item) => sum + item.bytes, 0);
 
   const fileSource = (path: string) => isTauri() && (path.startsWith("/") || /^[A-Za-z]:\\/.test(path)) ? convertFileSrc(path) : path;
@@ -550,7 +594,7 @@ export default function App() {
 
   const previewItems: { path: string; name: string; bytes: number; label: string }[] = largeTab === "outputs"
     ? (outputs ?? []).map((item) => ({ path: item.path, name: item.name, bytes: item.bytes, label: item.task }))
-    : (images ?? []).map((item) => ({ path: item.path, name: item.name, bytes: item.bytes, label: item.chat }));
+    : largeTab === "images" ? (images ?? []).map((item) => ({ path: item.path, name: item.name, bytes: item.bytes, label: item.chat })) : [];
   const previewIndex = previewItems.findIndex((item) => item.path === previewPath);
   const previewItem = previewIndex >= 0 ? previewItems[previewIndex] : null;
   const movePreview = (delta: number) => {
@@ -569,18 +613,19 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  const switchLargeTab = (tab: "outputs" | "images") => {
+  const switchLargeTab = (tab: LargeTab) => {
     if (tab === largeTab) return;
     setLargeTab(tab);
     setPickedOutputs(new Set());
-    if ((tab === "outputs" ? outputs : images) === null) void findOutputs(tab);
+    const loaded = tab === "outputs" ? outputs : tab === "images" ? images : orphans;
+    if (loaded === null) void findOutputs(tab);
   };
 
   const moveOutputsToTrash = async () => {
     setTrashModal(null);
     setOutputsBusy("trash");
     try {
-      const command = largeTab === "outputs" ? "trash_outputs" : "trash_generated_images";
+      const command = largeTab === "outputs" ? "trash_outputs" : largeTab === "images" ? "trash_generated_images" : "trash_orphan_folders";
       const response = await invoke<TrashResult>(command, { paths: [...pickedOutputs] });
       setTrashResult(response);
       setPickedOutputs(new Set());
@@ -702,22 +747,43 @@ export default function App() {
 
         {page === "outputs" && <>
           <div className="content page-content">
-            <section className="page-intro"><span className="eyebrow"><FolderSearch size={14} />{t.navOutputs}</span><h1>{largeTab === "outputs" ? t.outputsTitle : t.imagesTitle}</h1><p>{largeTab === "outputs" ? t.outputsBody : t.imagesBody}</p></section>
+            <section className="page-intro"><span className="eyebrow"><FolderSearch size={14} />{t.navOutputs}</span><h1>{largeTab === "outputs" ? t.outputsTitle : largeTab === "images" ? t.imagesTitle : t.orphansTitle}</h1><p>{largeTab === "outputs" ? t.outputsBody : largeTab === "images" ? t.imagesBody : t.orphansBody}</p></section>
             <div className="tab-switch" role="tablist">
               <button role="tab" aria-selected={largeTab === "outputs"} className={largeTab === "outputs" ? "active" : ""} onClick={() => switchLargeTab("outputs")} disabled={outputsBusy !== null}>{t.tabOutputs}</button>
               <button role="tab" aria-selected={largeTab === "images"} className={largeTab === "images" ? "active" : ""} onClick={() => switchLargeTab("images")} disabled={outputsBusy !== null}>{t.tabImages}</button>
+              <button role="tab" aria-selected={largeTab === "orphans"} className={largeTab === "orphans" ? "active" : ""} onClick={() => switchLargeTab("orphans")} disabled={outputsBusy !== null}>{t.tabOrphans}</button>
             </div>
             <section className="section-heading">
               <div><p>{largeTab === "outputs"
                 ? outputs ? `${outputs.length} ${t.outputsFound} · ${formatBytes(outputs.reduce((sum, item) => sum + item.bytes, 0))} · ${outputs.filter((item) => item.copyPath).length} ${t.withCopyCount}` : t.outputsHint
-                : images ? `${images.length} ${t.imagesFound} · ${formatBytes(images.reduce((sum, item) => sum + item.bytes, 0))} · ${images.filter((item) => item.copyPath).length} ${t.recommendedCount}` : t.imagesHint}</p></div>
+                : largeTab === "images"
+                  ? images ? `${images.length} ${t.imagesFound} · ${formatBytes(images.reduce((sum, item) => sum + item.bytes, 0))} · ${images.filter((item) => item.copyPath).length} ${t.recommendedCount}` : t.imagesHint
+                  : orphans ? `${orphans.length} ${t.orphansFound} · ${formatBytes(orphans.reduce((sum, item) => sum + item.bytes, 0))}` : t.orphansHint}</p></div>
               <div className="heading-actions">
                 {activeList.length > 0 && <button className="secondary-button" onClick={() => setPickedOutputs(new Set(activeList.map((item) => item.path)))} disabled={outputsBusy !== null || pickedOutputs.size === activeList.length}>{t.selectAll}</button>}
-                {activeList.length > 0 && <button className="secondary-button" onClick={() => setPickedOutputs(new Set(activeList.filter((item) => item.copyPath).map((item) => item.path)))} disabled={outputsBusy !== null || !activeList.some((item) => item.copyPath)}>{largeTab === "outputs" ? t.selectWithCopy : t.selectRecommended}</button>}
+                {activeList.length > 0 && largeTab !== "orphans" && <button className="secondary-button" onClick={() => setPickedOutputs(new Set(activeList.filter((item) => item.copyPath).map((item) => item.path)))} disabled={outputsBusy !== null || !activeList.some((item) => item.copyPath)}>{largeTab === "outputs" ? t.selectWithCopy : t.selectRecommended}</button>}
+                {largeTab === "outputs" && outputs && outputs.some((item) => item.orphan) && <button className="secondary-button" onClick={() => setPickedOutputs(new Set(outputs.filter((item) => item.orphan).map((item) => item.path)))} disabled={outputsBusy !== null}>{t.selectOrphans}</button>}
                 {pickedOutputs.size > 0 && <button className="secondary-button" onClick={() => setPickedOutputs(new Set())} disabled={outputsBusy !== null}>{t.clearSelection}</button>}
                 <button className="secondary-button scan-button" onClick={() => void findOutputs()} disabled={outputsBusy !== null}><RefreshCw size={16} className={outputsBusy === "search" ? "spin" : ""} />{outputsBusy === "search" ? t.searching : t.findOutputs}</button>
               </div>
             </section>
+            {largeTab === "orphans" && orphans && orphans.length === 0 && <p className="empty-note">{t.orphansEmpty}</p>}
+            {largeTab === "orphans" && orphans && orphans.length > 0 && <ul className="output-list">
+              {orphans.map((item) => {
+                const picked = pickedOutputs.has(item.path);
+                return <li key={item.path}>
+                  <div className={`output-row ${picked ? "picked" : ""}`}>
+                    <input type="checkbox" aria-label={item.name} checked={picked} onChange={() => togglePicked(item.path)} disabled={outputsBusy !== null} />
+                    <strong className="output-size">{formatBytes(item.bytes)}</strong>
+                    <button className="output-main" onClick={() => togglePicked(item.path)} title={item.path}><span className="output-name">{item.name}</span><small>{item.files} {t.filesLabel} · {item.modified}{item.hasGit ? ` · ${t.hasGit}` : ""}</small></button>
+                    <span className="output-badges"><span className="output-badge orphan">{t.orphanBadge}</span></span>
+                    <span className="row-actions">
+                      <button className="icon-button" title={revealLabel} aria-label={revealLabel} onClick={() => { if (isTauri()) invoke("reveal_orphan_folder", { path: item.path }).catch((cause) => { setError(String(cause)); setModal("error"); }); }}><FolderOpen size={15} /></button>
+                    </span>
+                  </div>
+                </li>;
+              })}
+            </ul>}
             {largeTab === "images" && images && images.length === 0 && <p className="empty-note">{t.imagesEmpty}</p>}
             {largeTab === "images" && images && images.length > 0 && <ul className="image-grid">
               {images.map((item) => {
@@ -751,7 +817,8 @@ export default function App() {
                     <span className="output-badges">
                       {item.copyPath && <span className="output-badge copy" title={item.copyPath}>{t.copyAt} {item.copyPath.split(/[\\/]/).slice(-2).join("/")}</span>}
                       {!item.copyPath && item.newerVersion && <span className="output-badge newer" title={item.newerVersion}>{t.newerVersion}: {item.newerVersion}</span>}
-                      {!item.copyPath && !item.newerVersion && <span className="output-badge none">{t.noCopy}</span>}
+                      {item.orphan && <span className="output-badge orphan">{t.orphanBadge}</span>}
+                      {!item.copyPath && !item.newerVersion && !item.orphan && <span className="output-badge none">{t.noCopy}</span>}
                     </span>
                     <span className="row-actions">
                       {previewKind(item.name) && <button className="icon-button" title={t.preview} aria-label={t.preview} onClick={() => setPreviewPath(item.path)}><Eye size={15} /></button>}

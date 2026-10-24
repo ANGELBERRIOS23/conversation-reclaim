@@ -55,6 +55,25 @@ async fn trash_generated_images(paths: Vec<String>) -> Result<outputs::TrashResu
 }
 
 #[tauri::command]
+async fn list_orphan_folders() -> Result<Vec<outputs::OrphanFolder>, String> {
+    tauri::async_runtime::spawn_blocking(outputs::list_orphan_folders)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn trash_orphan_folders(paths: Vec<String>) -> Result<outputs::TrashResult, String> {
+    tauri::async_runtime::spawn_blocking(move || outputs::trash_orphan_folders(paths))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn reveal_orphan_folder(path: String) -> Result<(), String> {
+    outputs::reveal_orphan_folder(path)
+}
+
+#[tauri::command]
 fn open_large_file(path: String) -> Result<(), String> {
     outputs::open_large_file(path)
 }
@@ -123,6 +142,9 @@ pub fn run() {
             trash_generated_images,
             open_large_file,
             reveal_large_file,
+            list_orphan_folders,
+            trash_orphan_folders,
+            reveal_orphan_folder,
             check_for_update,
             install_update
         ])
