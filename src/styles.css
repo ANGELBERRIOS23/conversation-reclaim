@@ -166,3 +166,14 @@ h1 { max-width: 710px; font-size: clamp(34px, 4.2vw, 55px); line-height: 1.04; l
 .secondary-button.marked { color: #c2410c; border-color: rgba(194,65,12,.35); }
 @media (max-width: 680px) { .output-row { grid-template-columns: auto 1fr auto; } .output-row .output-size { grid-column: 2; } .output-row .output-main, .output-row .output-badges { grid-column: 2 / 4; } .output-row .row-actions { grid-column: 3; grid-row: 1; } }
 @media (prefers-color-scheme: dark) { .icon-button { background: rgba(39,46,54,.8); } .preview-media { background: rgba(255,255,255,.05); } .preview-nav { background: rgba(39,46,54,.9); color: #e8edf2; } .secondary-button.marked { color: #fdba74; } }
+/* La miniatura toma el ancho de la tarjeta, no el de la imagen (1024 px). */
+.image-grid > li { min-width: 0; }
+.image-card { min-width: 0; overflow: hidden; }
+.image-thumb { display: block; width: 100%; min-width: 0; overflow: hidden; }
+.image-thumb img { height: auto; }
+.image-meta { min-width: 0; }
+.image-meta strong { flex: none; white-space: nowrap; }
+.image-meta small { min-width: 0; text-align: right; }
+.output-badge.none { color: var(--muted); background: rgba(30,43,56,.06); font-weight: 500; }
+.preview-media img { width: auto; height: auto; }
+@media (prefers-color-scheme: dark) { .output-badge.none { background: rgba(255,255,255,.06); } }

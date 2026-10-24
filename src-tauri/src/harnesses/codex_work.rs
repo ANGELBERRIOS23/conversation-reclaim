@@ -11,6 +11,22 @@ const MEDIA: &[&str] = &[
 ];
 const SKIP_DIRS: &[&str] = &["node_modules", ".git", ".venv", "venv", "Library", ".Trash"];
 
+const IMAGES: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "heic"];
+
+fn is_hidden(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.'))
+}
+
+/// Una imagen de verdad: ni `.DS_Store` ni otros archivos ocultos que Finder
+/// deja en las carpetas.
+pub(crate) fn is_generated_image(path: &Path) -> bool {
+    !is_hidden(path)
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| IMAGES.contains(&e.to_ascii_lowercase().as_str()))
+}
+
 fn is_media(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -113,7 +129,7 @@ pub(crate) fn identical_copies(
             })
             .filter_map(Result::ok)
         {
-            if !entry.file_type().is_file() {
+            if !entry.file_type().is_file() || is_hidden(entry.path()) {
                 continue;
             }
             let Some(candidates) = by_size.get(&file_size(entry.path())) else {
@@ -140,7 +156,7 @@ pub(crate) fn generated_duplicates(generated: &Path, search_roots: &[PathBuf], w
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file() && file_size(e.path()) > 0 && is_older_than_cutoff(e.path()))
+        .filter(|e| e.file_type().is_file() && is_generated_image(e.path()) && file_size(e.path()) > 0 && is_older_than_cutoff(e.path()))
         .map(|e| e.into_path())
         .collect();
     if originals.is_empty() {
@@ -240,6 +256,8 @@ mod tests {
     fn generated_images_need_an_identical_copy_outside_work() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
+        make(root, "gen/a/.DS_Store", b"finder", true);
+        make(root, "docs/.DS_Store", b"finder", false);
         let copied = make(root, "gen/a/copied.png", b"same bytes", true);
         make(root, "gen/a/unique.png", b"only here", true);
         let work_only = make(root, "gen/b/work-only.png", b"in work only", true);

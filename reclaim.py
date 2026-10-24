@@ -48,7 +48,7 @@ from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home()
-VERSION = "3.9.0"
+VERSION = "3.9.1"
 MANIFEST_DIR = HOME / ".conversation-reclaim"
 TRANSIENT_MEDIA_MIN_AGE = 7 * 24 * 60 * 60
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -1919,6 +1919,13 @@ MIN_IMAGE_CHARS = 1024
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 WORK_MEDIA_SUFFIXES = IMAGE_SUFFIXES | VIDEO_SUFFIXES | {".heic", ".tif", ".tiff", ".bmp"}
 DUPLICATE_SEARCH_SKIP = {"node_modules", ".git", ".venv", "venv", "Library", ".Trash"}
+GENERATED_IMAGE_SUFFIXES = IMAGE_SUFFIXES | {".heic"}
+
+
+def is_generated_image(path):
+    """Una imagen de verdad: ni .DS_Store ni otros ocultos que deja Finder."""
+    path = Path(path)
+    return not path.name.startswith(".") and path.suffix.lower() in GENERATED_IMAGE_SUFFIXES
 
 
 def _cutoff(min_age_days, reference_time=None):
@@ -2244,7 +2251,7 @@ def codex_generated_duplicates(min_age_days, search_roots=None, reference_time=N
                 st = path.lstat()
             except OSError:
                 continue
-            if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff and st.st_size > 0:
+            if is_generated_image(path) and stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff and st.st_size > 0:
                 by_size[st.st_size].append(path)
     if not by_size:
         return []
@@ -2265,6 +2272,8 @@ def codex_generated_duplicates(min_age_days, search_roots=None, reference_time=N
                 dirs[:] = []
                 continue
             for name in files:
+                if name.startswith("."):
+                    continue
                 copy = Path(current) / name
                 try:
                     st = copy.lstat()
@@ -2553,6 +2562,8 @@ def find_identical_copies(originals, search_roots, skip_dir=None):
                 dirs[:] = []
                 continue
             for name in files:
+                if name.startswith("."):
+                    continue
                 copy = Path(current) / name
                 if copy in originals_set:
                     continue
@@ -2604,7 +2615,7 @@ def codex_outputs(min_bytes=None, find_copies=True, extra_roots=()):
                     st = path.lstat()
                 except OSError:
                     continue
-                if stat.S_ISREG(st.st_mode) and st.st_size >= min_bytes:
+                if stat.S_ISREG(st.st_mode) and st.st_size >= min_bytes and not name.startswith("."):
                     items.append({"path": path, "size": st.st_size, "mtime": st.st_mtime,
                                   "task": "/".join(path.relative_to(workspace).parts[:2]),
                                   "copy": None, "newer": None})
@@ -2679,7 +2690,7 @@ def codex_generated_list(find_copies=True):
                 st = path.lstat()
             except OSError:
                 continue
-            if stat.S_ISREG(st.st_mode) and st.st_size > 0:
+            if is_generated_image(path) and stat.S_ISREG(st.st_mode) and st.st_size > 0:
                 chat = path.parent.name
                 items.append({"path": path, "size": st.st_size, "mtime": st.st_mtime,
                               "task": titles.get(chat) or chat, "copy": None, "newer": None})

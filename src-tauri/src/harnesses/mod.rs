@@ -13,7 +13,7 @@ mod trae;
 mod windsurf;
 mod zcode;
 
-pub(crate) use codex_work::{identical_copies, is_work_dir, search_roots as user_search_roots};
+pub(crate) use codex_work::{identical_copies, is_generated_image, is_work_dir, search_roots as user_search_roots};
 pub(crate) use images::rewrite_without_images;
 
 use crate::engine::Action;

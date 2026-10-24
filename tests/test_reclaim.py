@@ -921,6 +921,8 @@ class GeneratedListTests(OutputsFixture):
 
     def test_recommended_first_with_chat_title(self):
         self.make(".codex/generated_images/chat-a/big.png", 300, b"a")
+        self.make(".codex/generated_images/chat-a/.DS_Store", 40, b"d")
+        self.make("Downloads/.DS_Store", 40, b"d")
         copied = self.make(".codex/generated_images/chat-b/copied.png", 100, b"b")
         self.make("Downloads/logo.png", 100, b"b")
         in_work = self.make(".codex/generated_images/chat-a/draft.png", 200, b"c")
@@ -934,6 +936,7 @@ class GeneratedListTests(OutputsFixture):
         self.assertEqual(items[0]["task"], "Logo para la web")
         self.assertEqual(items[0]["copy"], self.root / "Downloads/logo.png")
         self.assertIsNone(next(i for i in items if i["path"] == in_work)["copy"])
+        self.assertFalse(any(i["path"].name == ".DS_Store" for i in items))
 
     def test_trash_stays_inside_generated_images(self):
         image = self.make(".codex/generated_images/chat/x.png", 50)

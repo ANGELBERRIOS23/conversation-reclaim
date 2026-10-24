@@ -164,6 +164,8 @@ const copy = {
     newerVersion: "Hay versión más nueva",
     selectWithCopy: "Marcar los que tienen copia",
     clearSelection: "Quitar selección",
+    selectAll: "Seleccionar todo",
+    noCopy: "Sin copia en otro lado",
     moveToTrash: "Mover a la Papelera",
     moving: "Moviendo…",
     trashConfirmTitle: "¿Mover a la Papelera?",
@@ -279,6 +281,8 @@ const copy = {
     newerVersion: "Newer version available",
     selectWithCopy: "Select the ones with a copy",
     clearSelection: "Clear selection",
+    selectAll: "Select all",
+    noCopy: "No copy elsewhere",
     moveToTrash: "Move to Trash",
     moving: "Moving…",
     trashConfirmTitle: "Move to Trash?",
@@ -347,7 +351,7 @@ const demoOutputs: OutputItem[] = [
   { path: "/demo/Documents/Codex/2026-09-02/q/outputs/Marketing_v1.zip", name: "Marketing_v1.zip", task: "2026-09-02/q", bytes: 147_324_928, modified: "2026-09-02", copyPath: null, newerVersion: "Marketing_v2.zip" },
 ];
 
-const demoTile = (hue: number) => `data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' width='240' height='160'><rect width='240' height='160' fill='hsl(${hue} 55% 82%)'/><circle cx='120' cy='80' r='38' fill='hsl(${hue} 50% 60%)'/></svg>`)}`;
+const demoTile = (hue: number) => `data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' width='1024' height='1024'><rect width='1024' height='1024' fill='hsl(${hue} 55% 82%)'/><circle cx='512' cy='512' r='260' fill='hsl(${hue} 50% 60%)'/></svg>`)}`;
 
 const demoImages: GeneratedImage[] = [
   { path: demoTile(210), name: "exec-logo.png", chat: "Logo VXM", bytes: 2_150_000, modified: "2026-10-13", copyPath: "/demo/Downloads/Manolito/logo.png" },
@@ -708,7 +712,8 @@ export default function App() {
                 ? outputs ? `${outputs.length} ${t.outputsFound} · ${formatBytes(outputs.reduce((sum, item) => sum + item.bytes, 0))} · ${outputs.filter((item) => item.copyPath).length} ${t.withCopyCount}` : t.outputsHint
                 : images ? `${images.length} ${t.imagesFound} · ${formatBytes(images.reduce((sum, item) => sum + item.bytes, 0))} · ${images.filter((item) => item.copyPath).length} ${t.recommendedCount}` : t.imagesHint}</p></div>
               <div className="heading-actions">
-                {activeList.some((item) => item.copyPath) && <button className="secondary-button" onClick={() => setPickedOutputs(new Set(activeList.filter((item) => item.copyPath).map((item) => item.path)))} disabled={outputsBusy !== null}>{largeTab === "outputs" ? t.selectWithCopy : t.selectRecommended}</button>}
+                {activeList.length > 0 && <button className="secondary-button" onClick={() => setPickedOutputs(new Set(activeList.map((item) => item.path)))} disabled={outputsBusy !== null || pickedOutputs.size === activeList.length}>{t.selectAll}</button>}
+                {activeList.length > 0 && <button className="secondary-button" onClick={() => setPickedOutputs(new Set(activeList.filter((item) => item.copyPath).map((item) => item.path)))} disabled={outputsBusy !== null || !activeList.some((item) => item.copyPath)}>{largeTab === "outputs" ? t.selectWithCopy : t.selectRecommended}</button>}
                 {pickedOutputs.size > 0 && <button className="secondary-button" onClick={() => setPickedOutputs(new Set())} disabled={outputsBusy !== null}>{t.clearSelection}</button>}
                 <button className="secondary-button scan-button" onClick={() => void findOutputs()} disabled={outputsBusy !== null}><RefreshCw size={16} className={outputsBusy === "search" ? "spin" : ""} />{outputsBusy === "search" ? t.searching : t.findOutputs}</button>
               </div>
@@ -722,8 +727,10 @@ export default function App() {
                   <div className={`image-card ${picked ? "picked" : ""}`} title={item.path}>
                     <input type="checkbox" aria-label={item.name} checked={picked} onChange={() => togglePicked(item.path)} disabled={outputsBusy !== null} />
                     <button className="image-thumb" onClick={() => setPreviewPath(item.path)} aria-label={`${t.preview}: ${item.name}`}><img src={source} alt={item.name} loading="lazy" /></button>
-                    <span className="image-meta"><strong>{formatBytes(item.bytes)}</strong><small>{item.chat} · {item.modified}</small></span>
-                    {item.copyPath && <span className="output-badge copy" title={item.copyPath}>{t.recommendedBadge} · {t.copyAt} {item.copyPath.split(/[\\/]/).slice(-2).join("/")}</span>}
+                    <span className="image-meta"><strong>{formatBytes(item.bytes)}</strong><small title={item.chat}>{item.modified} · {item.chat}</small></span>
+                    {item.copyPath
+                      ? <span className="output-badge copy" title={item.copyPath}>{t.recommendedBadge} · {t.copyAt} {item.copyPath.split(/[\\/]/).slice(-2).join("/")}</span>
+                      : <span className="output-badge none">{t.noCopy}</span>}
                     <span className="row-actions">
                       <button className="icon-button" title={t.openFile} aria-label={t.openFile} onClick={() => void runFileAction("open_large_file", item.path)}><ExternalLink size={15} /></button>
                       <button className="icon-button" title={revealLabel} aria-label={revealLabel} onClick={() => void runFileAction("reveal_large_file", item.path)}><FolderOpen size={15} /></button>
@@ -744,6 +751,7 @@ export default function App() {
                     <span className="output-badges">
                       {item.copyPath && <span className="output-badge copy" title={item.copyPath}>{t.copyAt} {item.copyPath.split(/[\\/]/).slice(-2).join("/")}</span>}
                       {!item.copyPath && item.newerVersion && <span className="output-badge newer" title={item.newerVersion}>{t.newerVersion}: {item.newerVersion}</span>}
+                      {!item.copyPath && !item.newerVersion && <span className="output-badge none">{t.noCopy}</span>}
                     </span>
                     <span className="row-actions">
                       {previewKind(item.name) && <button className="icon-button" title={t.preview} aria-label={t.preview} onClick={() => setPreviewPath(item.path)}><Eye size={15} /></button>}

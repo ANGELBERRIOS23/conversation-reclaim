@@ -2,7 +2,7 @@
 //! persona elige qué mandar a la Papelera.
 
 use crate::engine::file_size;
-use crate::harnesses::{identical_copies, is_work_dir, user_search_roots};
+use crate::harnesses::{identical_copies, is_generated_image, is_work_dir, user_search_roots};
 use chrono::{DateTime, Local};
 use serde::Serialize;
 use serde_json::json;
@@ -78,7 +78,8 @@ fn collect(workspace: &Path, min_bytes: u64) -> Vec<PathBuf> {
                 continue;
             }
             for entry in WalkDir::new(&outputs).follow_links(false).into_iter().filter_map(Result::ok) {
-                if entry.file_type().is_file() && file_size(entry.path()) >= min_bytes {
+                let hidden = entry.file_name().to_string_lossy().starts_with('.');
+                if entry.file_type().is_file() && !hidden && file_size(entry.path()) >= min_bytes {
                     found.push(entry.into_path());
                 }
             }
@@ -155,6 +156,7 @@ fn trash_checked(paths: Vec<String>, manifest_dir: &Path, kind: &str, allowed: &
     let mut manifest = OpenOptions::new().create_new(true).write(true).open(&manifest_path).map_err(|e| e.to_string())?;
     let mut result = TrashResult { moved: 0, freed_bytes: 0, manifest_path: manifest_path.display().to_string(), errors: Vec::new() };
 
+    let mut accepted: Vec<(String, PathBuf, u64)> = Vec::new();
     for raw in paths {
         let path = PathBuf::from(&raw);
         let real = fs::canonicalize(&path).ok();
@@ -165,15 +167,32 @@ fn trash_checked(paths: Vec<String>, manifest_dir: &Path, kind: &str, allowed: &
             continue;
         };
         let size = file_size(&real);
-        match trash::delete(&real) {
-            Ok(()) => {
-                result.moved += 1;
-                result.freed_bytes += size;
-                writeln!(manifest, "{}", json!({"type": kind, "path": raw, "bytes": size, "time": Local::now().to_rfc3339()}))
-                    .map_err(|e| e.to_string())?;
+        accepted.push((raw, real, size));
+    }
+
+    // Todos juntos en una sola operación: Finder suena una vez (no una por
+    // archivo) y "Devolver" sigue funcionando. Si el lote falla, se intenta
+    // uno por uno para que un archivo con problema no frene a los demás.
+    if !accepted.is_empty() && trash::delete_all(accepted.iter().map(|(_, real, _)| real)).is_err() {
+        for (raw, real, _) in &accepted {
+            if real.exists() {
+                if let Err(error) = trash::delete(real) {
+                    result.errors.push(format!("{raw}: {error}"));
+                }
             }
-            Err(error) => result.errors.push(format!("{raw}: {error}")),
         }
+    }
+    for (raw, real, size) in &accepted {
+        if real.exists() {
+            if !result.errors.iter().any(|e| e.starts_with(raw.as_str())) {
+                result.errors.push(format!("{raw}: still in place"));
+            }
+            continue;
+        }
+        result.moved += 1;
+        result.freed_bytes += size;
+        writeln!(manifest, "{}", json!({"type": kind, "path": raw, "bytes": size, "time": Local::now().to_rfc3339()}))
+            .map_err(|e| e.to_string())?;
     }
     manifest.sync_all().map_err(|e| e.to_string())?;
     Ok(result)
@@ -213,7 +232,7 @@ pub(crate) fn generated_for(home: &Path, find_copies: bool) -> Vec<GeneratedImag
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file() && file_size(e.path()) > 0)
+        .filter(|e| e.file_type().is_file() && is_generated_image(e.path()) && file_size(e.path()) > 0)
         .map(|e| e.into_path())
         .collect();
     let workspace = workspace(home);
@@ -339,6 +358,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
         make(home, ".codex/generated_images/chat-a/big.png", &[b'a'; 300]);
+        make(home, ".codex/generated_images/chat-a/.DS_Store", b"finder");
+        make(home, "Documents/Codex/d/t/outputs/.DS_Store", b"finder");
         make(home, ".codex/generated_images/chat-a/copied.png", &[b'b'; 100]);
         make(home, ".codex/generated_images/chat-b/in-work-only.png", &[b'c'; 200]);
         make(home, "Downloads/kept.png", &[b'b'; 100]);
@@ -362,6 +383,28 @@ mod tests {
         assert_eq!(result.moved, 0);
         assert_eq!(result.errors.len(), 2);
         assert!(other.exists() && image.exists());
+    }
+
+    /// Usa la Papelera real (suena una vez). Se corre a mano:
+    /// `cargo test real_trash_batch -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn real_trash_batch() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let names = ["reclaim-prueba-1.txt", "reclaim-prueba-2.txt", "reclaim-prueba-3.txt"];
+        let paths: Vec<String> = names
+            .iter()
+            .map(|n| make(home, &format!("Documents/Codex/d/t/outputs/{n}"), b"prueba").display().to_string())
+            .collect();
+        let result = trash_for(home, paths, &home.join("m")).unwrap();
+        println!("moved={} errors={:?}", result.moved, result.errors);
+        assert_eq!(result.moved, 3);
+        // Se sacan de la Papelera para que el directorio temporal los borre.
+        let trash = dirs::home_dir().unwrap().join(".Trash");
+        for name in names {
+            let _ = fs::rename(trash.join(name), home.join(name));
+        }
     }
 
     #[test]
