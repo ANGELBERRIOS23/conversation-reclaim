@@ -88,7 +88,8 @@ nativos, el índice del actualizador y sus firmas, y los adjunta al Release.
 ```bash
 python3 reclaim.py scan                    # estimación de solo lectura
 python3 reclaim.py apply                   # aplica; escribe manifiesto en ~/.conversation-reclaim/
-python3 reclaim.py apply --backup-dir /Volumes/DISCO/respaldos-ia   # respaldo completo opcional
+python3 reclaim.py apply --backup-dir /Volumes/DISCO/respaldos-ia   # respaldo opcional de lo que se va a tocar
+python3 reclaim.py apply --only claude --recent-minutes 0   # Claude: protege solo las abiertas, no las recién cambiadas
 python3 reclaim.py apply --only antigravity   # solo una herramienta
 python3 reclaim.py apply --only media         # solo adjuntos temporales antiguos (opcional)
 python3 reclaim.py apply --include-media      # incluir adjuntos temporales en una limpieza completa
@@ -178,6 +179,20 @@ Otras dos diferencias con OpenCode 2:
 
 ## Seguridad
 
+- **Conversaciones abiertas de Claude Code.** Claude Code abre su `.jsonl`,
+  agrega una línea y lo cierra, así que `lsof` no ve que la conversación sigue
+  abierta. Por eso no se tocan (ni se recortan, ni se les quitan subagentes o
+  imágenes):
+  - las conversaciones de los procesos vivos según `~/.claude/sessions/<pid>.json`;
+  - las de `--resume`/`--session-id` en la línea de comando de un proceso;
+  - las que cambiaron en los últimos 60 minutos (`--recent-minutes`; `0` lo
+    apaga).
+  `scan` dice cuáles están abiertas. La app de escritorio sigue la misma regla.
+- **El respaldo cubre solo lo que se va a tocar.** Con `--backup-dir`:
+  - `--only claude` copia solo las conversaciones que se van a recortar y los
+    subagentes que se van a borrar;
+  - los rollouts de Codex solo se copian si se van a quitar imágenes.
+  `--trash` solo aplica a los extras.
 - **Respaldo opcional pero recomendado.** `apply` sin `--backup-dir` no copia
   nada a ningún lado; en su lugar escribe un manifiesto de cambios en
   `~/.conversation-reclaim/` y usa reemplazos atómicos de archivo (una corrida

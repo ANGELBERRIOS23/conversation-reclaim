@@ -48,7 +48,7 @@ from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home()
-VERSION = "3.10.0"
+VERSION = "3.11.0"
 MANIFEST_DIR = HOME / ".conversation-reclaim"
 TRANSIENT_MEDIA_MIN_AGE = 7 * 24 * 60 * 60
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -78,6 +78,17 @@ _T = {
     "TOTAL backup:": "TOTAL backup:",
     "AVISO: archivos de Claude Code en uso (¿claude corriendo?). Se omiten.":
         "WARNING: Claude Code files in use (claude running?). Skipping.",
+    "AVISO: no se pudo saber qué conversaciones de Claude están abiertas;":
+        "WARNING: could not tell which Claude conversations are open;",
+    "solo se protegen las que cambiaron en los últimos":
+        "only those changed in the last",
+    "Se dejan sin tocar": "Leaving untouched",
+    "conversaciones de Claude": "Claude conversations",
+    "abiertas; las demás cambiaron en los últimos": "open; the rest changed in the last",
+    "o están en uso": "or are in use",
+    "abierta": "open",
+    "conversación abierta; se omite": "open conversation; skipping",
+    "abiertas ahora, no se tocan:": "open right now, left untouched:",
     "subagentes eliminados:": "subagents deleted:",
     "archivos,": "files,",
     "recortados": "trimmed",
@@ -256,6 +267,7 @@ def _opencode_db():
 
 PATHS = {
     "claude_projects": HOME / ".claude" / "projects",
+    "claude_sessions": HOME / ".claude" / "sessions",
     "codex_sessions": HOME / ".codex" / "sessions",
     "codex_archived": HOME / ".codex" / "archived_sessions",
     "codex_cache": HOME / ".codex" / "cache",
@@ -430,6 +442,117 @@ def claude_subagent_info(path):
     except OSError:
         return None
     return {"agent_id": expected_agent, "session_id": expected_session} if found else None
+
+
+# Claude Code abre su .jsonl, agrega una línea y lo cierra, así que lsof no ve
+# una conversación abierta. Se protegen las de procesos vivos y, por si acaso,
+# las que cambiaron en los últimos minutos.
+CLAUDE_RECENT_MINUTES = 60
+_SESSION_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_RESUME_ARG_RE = re.compile(r"(?:--resume|--session-id|-r)(?:=|\s+)(" +
+                            _SESSION_ID_RE.pattern + r")")
+
+
+def pid_alive(pid):
+    """True si el proceso existe; None si no se puede saber."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if _IS_WIN:
+        try:
+            import ctypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+            if not handle:
+                return ctypes.get_last_error() == 5  # acceso denegado: existe
+            code = ctypes.c_ulong()
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            kernel32.CloseHandle(handle)
+            return bool(ok) and code.value == 259  # STILL_ACTIVE
+        except (AttributeError, OSError):
+            return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def claude_open_session_ids():
+    """Ids de las conversaciones de Claude Code abiertas ahora.
+
+    Claude Code deja ~/.claude/sessions/<pid>.json con el sessionId de cada
+    proceso; también se leen --resume/--session-id de los procesos vivos por si
+    una versión vieja no deja ese archivo. None si no se pudo saber por ninguno.
+    """
+    ids = set()
+    known = False
+    sessions = PATHS.get("claude_sessions")
+    if sessions is not None and sessions.is_dir():
+        known = True
+        for f in sessions.glob("*.json"):
+            try:
+                info = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(info, dict):
+                continue
+            sid = info.get("sessionId")
+            pid = info.get("pid")
+            if not isinstance(pid, int) and f.stem.isdigit():
+                pid = int(f.stem)
+            if isinstance(sid, str) and _SESSION_ID_RE.fullmatch(sid) and pid_alive(pid) is not False:
+                ids.add(sid)
+    if not _IS_WIN:
+        try:
+            result = subprocess.run(["ps", "axww", "-o", "args="], capture_output=True,
+                                    text=True, timeout=20)
+            if result.returncode == 0:
+                known = True
+                ids.update(_RESUME_ARG_RE.findall(result.stdout))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return ids if known else None
+
+
+def claude_protection(path, open_ids, cutoff, base=None):
+    """Motivo para no tocar este archivo de Claude Code, o None.
+
+    Sirve para <proyecto>/<sesión>.jsonl y para lo que cuelga de
+    <proyecto>/<sesión>/subagents/. cutoff es un time.time(): lo que cambió
+    después (el archivo o la conversación dueña) se deja.
+    """
+    base = Path(base or PATHS["claude_projects"])
+    path = Path(path)
+    try:
+        rel = path.relative_to(base)
+    except ValueError:
+        rel = Path(path.name)
+    ids = set()
+    for part in rel.parts[1:]:
+        name = part[:-len(".jsonl")] if part.endswith(".jsonl") else part
+        if _SESSION_ID_RE.fullmatch(name):
+            ids.add(name)
+    if open_ids and ids & set(open_ids):
+        return "conversación abierta"
+    if cutoff is None:
+        return None
+    owners = [base / rel.parts[0] / f"{i}.jsonl" for i in ids] if len(rel.parts) > 1 else []
+    for candidate in [path, *owners]:
+        try:
+            if candidate.is_dir():
+                newest = max((p.stat().st_mtime for p in candidate.rglob("*")),
+                             default=candidate.stat().st_mtime)
+            else:
+                newest = candidate.stat().st_mtime
+        except OSError:
+            continue
+        if newest >= cutoff:
+            return "cambió hace poco"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -792,6 +915,12 @@ def scan():
               f"({ncomp} {_('compactadas')}){extra}")
         for b, s, fpath in r.get("top", [])[:4]:
             print(f"    {human(b):>9} de {human(s):>9}  {Path(fpath).name[:50]}")
+        if name == "Claude Code":
+            open_ids = claude_open_session_ids() or set()
+            abiertas = [Path(f).stem for _b, _s, f in r.get("top", []) if Path(f).stem in open_ids]
+            if abiertas:
+                print(f"    {len(abiertas)} {_('abiertas ahora, no se tocan:')} "
+                      + ", ".join(a[:8] for a in abiertas))
 
     print(f"{'='*72}")
     print(f"{'TOTAL':<13}{human(total):>10}   compactación: {human(reclaim)}")
@@ -1170,35 +1299,123 @@ def safe_copy(src, dst):
         pass
 
 
-def backup(backup_dir, include_media=False):
+# Qué parte del respaldo necesita cada --only: solo lo que esa limpieza cambia.
+BACKUP_SECTIONS = {
+    None: {"claude", "codex-sessions", "codex", "opencode-db", "opencode", "commandcode",
+           "antigravity"},
+    "claude": {"claude"},
+    "codex": {"codex"},
+    "opencode": {"opencode"},
+    "antigravity": {"antigravity"},
+    "caches": {"codex", "opencode", "antigravity"},
+    "commandcode": {"commandcode"},
+    "media": set(),
+}
+
+
+def _copy_into(dest, base, paths):
+    """Copia cada ruta (archivo o carpeta) a dest conservando su ruta bajo base."""
+    copied = 0
+    for p in paths:
+        p = Path(p)
+        if not p.exists() and not p.is_symlink():
+            continue
+        try:
+            rel = p.relative_to(base)
+        except ValueError:
+            rel = Path(*p.parts[1:]) if p.is_absolute() else p
+        out = dest / rel
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if p.is_dir() and not p.is_symlink():
+            shutil.copytree(p, out, copy_function=safe_copy, symlinks=True)
+            copied += dir_size(out)
+        else:
+            safe_copy(p, out)
+            copied += out.lstat().st_size
+    return copied
+
+
+def claude_plan_paths(plan):
+    paths = list(plan["trim"]) + list(plan["subagents"]) + list(plan["metas"])
+    paths += [p.with_name(p.name.replace(".jsonl", "") + ".meta.json")
+              for p in plan["subagents"]]
+    return paths + list(plan["workflows"])
+
+
+def extras_targets(kinds, min_age_days):
+    """Archivos y carpetas que las limpiezas extra van a cambiar o quitar."""
+    targets = []
+    if "images" in kinds:
+        targets += [path for tool, path in conversation_image_candidates(min_age_days)
+                    if estimate_session_images(path, tool) > 0]
+    if "codex-work" in kinds:
+        targets += list(codex_work_candidates(min_age_days))
+        targets += [original for original, _copy in codex_generated_duplicates(min_age_days)]
+    if "old-versions" in kinds:
+        targets += [path for _label, path in old_version_candidates(min_age_days)]
+    return targets
+
+
+def backup(backup_dir, include_media=False, only=None, claude=None, extras=(),
+           min_age_days=None):
+    """Respalda lo que la limpieza va a tocar.
+
+    only: el --only elegido (None = todo). claude: plan de claude_plan(); con
+    él se copian solo esas conversaciones y no toda ~/.claude/projects.
+    extras: categorías extra que se aplicarán.
+    """
     root = Path(backup_dir).expanduser().resolve()
     sources = [Path(p).resolve() for p in
                (PATHS["claude_projects"], PATHS["codex_sessions"],
                 PATHS["opencode_dir"], PATHS["gemini"])]
     if any(root == src or src in root.parents for src in sources):
         raise ValueError("el destino de respaldo no puede estar dentro de una fuente")
+    sections = set(BACKUP_SECTIONS.get(only, set()))
+    if only is None and "images" not in extras:
+        # apply nunca reescribe los rollouts de Codex; solo la extra de imágenes.
+        sections.discard("codex-sessions")
     dest = root / f"conversation-reclaim-{now()}"
     dest.mkdir(parents=True, exist_ok=True)
     copied = 0
     print(f"{_('Backup en:')} {dest}")
 
-    # Claude Code: copia completa de ~/.claude/projects
-    if PATHS["claude_projects"].exists():
+    # Claude Code: las conversaciones que se van a recortar o borrar
+    if "claude" in sections and PATHS["claude_projects"].exists():
         d = dest / "claude-projects"
-        shutil.copytree(PATHS["claude_projects"], d, copy_function=safe_copy,
-                        symlinks=True)
-        copied += dir_size(d)
-        print(f"  claude-projects  -> {human(dir_size(d))}")
+        if claude is None:
+            shutil.copytree(PATHS["claude_projects"], d, copy_function=safe_copy,
+                            symlinks=True)
+            size = dir_size(d)
+        else:
+            size = _copy_into(d, PATHS["claude_projects"], claude_plan_paths(claude))
+        copied += size
+        print(f"  claude-projects  -> {human(size)}")
 
-    # Codex: sesiones + archivadas + cache + logs
-    for name, p in (("codex-sessions", PATHS["codex_sessions"]),
-                    ("codex-archived", PATHS["codex_archived"]),
-                    ("codex-cache", PATHS["codex_cache"])):
+    # Extras: lo que se va a reescribir o quitar, con su ruta bajo la carpeta personal
+    if extras:
+        size = _copy_into(dest / "extras", HOME,
+                          extras_targets(extras, DEFAULT_MIN_AGE_DAYS if min_age_days is None
+                                         else min_age_days))
+        copied += size
+        print(f"  extras            -> {human(size)}")
+
+    # Codex: sesiones + archivadas (solo para la extra de imágenes), cache + logs + estado
+    codex_dirs = []
+    if "codex-sessions" in sections:
+        codex_dirs += [("codex-sessions", PATHS["codex_sessions"]),
+                       ("codex-archived", PATHS["codex_archived"])]
+    if "codex" in sections:
+        codex_dirs.append(("codex-cache", PATHS["codex_cache"]))
+    for name, p in codex_dirs:
         if p.exists():
             shutil.copytree(p, dest / name, copy_function=safe_copy, symlinks=True)
             copied += dir_size(p)
             print(f"  {name:<18}-> {human(dir_size(p))}")
-    for l in PATHS["codex_logs"]:
+    codex_dbs = list(PATHS["codex_logs"]) if "codex" in sections else []
+    if "images" in extras:
+        # Al quitar imágenes de Codex se mueve su posición de lectura en estas bases.
+        codex_dbs += list(_codex_history_dbs())
+    for l in codex_dbs:
         if l.exists():
             out = dest / f"codex-{l.name}"
             try:
@@ -1208,7 +1425,7 @@ def backup(backup_dir, include_media=False):
             except sqlite3.Error:
                 safe_copy(l, out)
             copied += out.stat().st_size
-    if PATHS["codex_state"].exists():
+    if ("codex" in sections or "codex-sessions" in sections) and PATHS["codex_state"].exists():
         state_backup = dest / "codex-state.sqlite"
         with closing(sqlite3.connect(PATHS["codex_state"])) as src_con:
             with closing(sqlite3.connect(state_backup)) as dst_con:
@@ -1216,7 +1433,7 @@ def backup(backup_dir, include_media=False):
         copied += state_backup.stat().st_size
 
     # OpenCode: DB (copia consistente), snapshot, tool-output, log
-    if PATHS["opencode_db"].exists():
+    if "opencode-db" in sections and PATHS["opencode_db"].exists():
         db_backup = dest / "opencode.db"
         with closing(sqlite3.connect(PATHS["opencode_db"])) as src_con:
             with closing(sqlite3.connect(db_backup)) as dst_con:
@@ -1226,7 +1443,7 @@ def backup(backup_dir, include_media=False):
                     raise sqlite3.DatabaseError(f"backup opencode inválido: {ok}")
         copied += db_backup.stat().st_size
         print(f"  opencode.db       -> {human(db_backup.stat().st_size)}")
-    for name in ("snapshot", "tool-output", "log"):
+    for name in ("snapshot", "tool-output", "log") if "opencode" in sections else ():
         p = PATHS["opencode_dir"] / name
         if p.exists() and dir_size(p) > 0:
             shutil.copytree(p, dest / f"opencode-{name}", copy_function=safe_copy,
@@ -1235,7 +1452,7 @@ def backup(backup_dir, include_media=False):
             print(f"  opencode-{name:<14}-> {human(dir_size(p))}")
 
     # Command Code
-    if PATHS["commandcode"].exists():
+    if "commandcode" in sections and PATHS["commandcode"].exists():
         shutil.copytree(PATHS["commandcode"], dest / "commandcode",
                         copy_function=safe_copy, symlinks=True)
         copied += dir_size(PATHS["commandcode"])
@@ -1243,7 +1460,8 @@ def backup(backup_dir, include_media=False):
 
     # Antigravity/Gemini: conversaciones + transcripts + logs de apps
     gem = PATHS["gemini"]
-    if gem.exists():
+    antigravity = "antigravity" in sections
+    if antigravity and gem.exists():
         transcripts = 0
         for sub in GEMINI_CONV_DIRS:
             p = gem / sub
@@ -1278,7 +1496,7 @@ def backup(backup_dir, include_media=False):
     for app, name in ((PATHS["antigravity_app"], "antigravity-app"),
                       (PATHS["antigravity_ide_app"], "antigravity-ide-app")):
         p = app / "logs"
-        if p.exists():
+        if antigravity and p.exists():
             shutil.copytree(p, dest / f"{name}-logs", copy_function=safe_copy,
                             symlinks=True)
             copied += dir_size(p)
@@ -1394,19 +1612,82 @@ def remove_path(path):
     return size
 
 
-def apply_claude():
+def claude_plan(recent_minutes=CLAUDE_RECENT_MINUTES):
+    """Lo que apply_claude va a tocar, ya sin lo abierto ni lo reciente.
+
+    None si la carpeta de proyectos está en uso. Si no, un dict con 'trim'
+    (conversaciones con marcador), 'subagents', 'metas' sueltos, 'workflows',
+    'skipped' [(ruta, motivo)] y 'open_ids' (None si no se pudo saber).
+    """
     base = PATHS["claude_projects"]
-    entries = []
+    plan = {"trim": [], "subagents": [], "metas": [], "workflows": [],
+            "skipped": [], "open_ids": None}
     if not base.exists():
-        return 0, entries
+        return plan
     if database_in_use(base):
+        return None
+    open_ids = claude_open_session_ids()
+    plan["open_ids"] = open_ids
+    cutoff = time.time() - recent_minutes * 60 if recent_minutes and recent_minutes > 0 else None
+
+    def guard(p):
+        reason = claude_protection(p, open_ids, cutoff, base)
+        if reason is None and database_in_use(p) is not False:
+            reason = "en uso o no verificable"
+        if reason:
+            plan["skipped"].append((p, reason))
+        return reason is None
+
+    for f in sorted(base.glob("*/*.jsonl")):
+        if not guard(f):
+            continue
+        marker, error = find_last_marker(f, is_claude_compaction)
+        if not error and marker > 0:
+            plan["trim"].append(f)
+    # Sidechains de un solo uso; memory/ y el transcript principal no se tocan.
+    for p in sorted(base.rglob("subagents/agent-*.jsonl")):
+        if claude_subagent_info(p) and guard(p):
+            plan["subagents"].append(p)
+    for meta in sorted(base.rglob("subagents/agent-*.meta.json")):
+        sibling = meta.with_name(meta.name.replace(".meta.json", ".jsonl"))
+        if not sibling.exists() and guard(meta):
+            plan["metas"].append(meta)
+    for wf in sorted(base.rglob("subagents/workflows")):
+        if guard(wf):
+            plan["workflows"].append(wf)
+    return plan
+
+
+def print_claude_skipped(plan, recent_minutes):
+    if plan["open_ids"] is None:
+        print(f"  {_('AVISO: no se pudo saber qué conversaciones de Claude están abiertas;')}")
+        print(f"  {_('solo se protegen las que cambiaron en los últimos')} {recent_minutes} min.")
+    sessions = {}
+    for path, reason in plan["skipped"]:
+        names = [part[:-len(".jsonl")] if part.endswith(".jsonl") else part
+                 for part in Path(path).parts]
+        key = next((n for n in names if _SESSION_ID_RE.fullmatch(n)), Path(path).name)
+        sessions.setdefault(key, reason)
+    if not sessions:
+        return
+    abiertas = sorted(k for k, r in sessions.items() if r == "conversación abierta")
+    print(f"  {_('Se dejan sin tocar')} {len(sessions)} {_('conversaciones de Claude')} "
+          f"({len(abiertas)} {_('abiertas; las demás cambiaron en los últimos')} "
+          f"{recent_minutes} min {_('o están en uso')}).")
+    for key in abiertas:
+        print(f"    {key[:8]}… {_('abierta')}")
+
+
+def apply_claude(recent_minutes=CLAUDE_RECENT_MINUTES, plan=None):
+    entries = []
+    if plan is None:
+        plan = claude_plan(recent_minutes)
+    if plan is None:
         print(f"  {_('AVISO: archivos de Claude Code en uso (¿claude corriendo?). Se omiten.')}")
         return 0, entries
+    print_claude_skipped(plan, recent_minutes)
     freed = 0
-    for f in sorted(base.glob("*/*.jsonl")):
-        if database_in_use(f) is not False:
-            print(f"  {f.name[:30]}... en uso o no verificable; se omite")
-            continue
+    for f in plan["trim"]:
         cut, size, done, marker = truncate_file_at_marker(f, is_claude_compaction, "claude")
         if done:
             freed += cut
@@ -1417,8 +1698,7 @@ def apply_claude():
 
     # Sidechains de un solo uso; memory/ y el transcript principal no se tocan.
     sub_n = sub_bytes = 0
-    subagents = [p for p in base.rglob("subagents/agent-*.jsonl")
-                 if claude_subagent_info(p) and database_in_use(p) is False]
+    subagents = [p for p in plan["subagents"] if p.exists()]
     if subagents:
         preview_bytes = sum(p.stat().st_size for p in subagents)
         print(f"  AVISO: se eliminarán {len(subagents)} transcripts de subagentes "
@@ -1441,9 +1721,9 @@ def apply_claude():
                             "file": str(meta), "cut_bytes": meta_size,
                             "old_size": meta_size, "marker_offset": -1,
                             "time": now()})
-    for meta in base.rglob("subagents/agent-*.meta.json"):
+    for meta in plan["metas"]:
         sibling = meta.with_name(meta.name.replace(".meta.json", ".jsonl"))
-        if sibling.exists() or database_in_use(meta) is not False:
+        if not meta.exists() or sibling.exists():
             continue
         sub_bytes += meta.stat().st_size
         sub_n += 1
@@ -1452,9 +1732,8 @@ def apply_claude():
         entries.append({"tool": "claude", "action": "delete_subagent_meta",
                         "file": str(meta), "cut_bytes": size, "old_size": size,
                         "marker_offset": -1, "time": now()})
-    for wf in base.rglob("subagents/workflows"):
-        if database_in_use(wf) is not False:
-            print(f"  {wf}: en uso o no verificable; se omite")
+    for wf in plan["workflows"]:
+        if not wf.exists():
             continue
         size = dir_size(wf)
         sub_bytes += size
@@ -2552,8 +2831,12 @@ def apply_extras(kinds, min_age_days, trash=None):
     opened = open_files()
     if "images" in kinds:
         done = 0
+        open_ids = claude_open_session_ids()
         for tool, path in conversation_image_candidates(min_age_days):
             if _in_use(path, opened):
+                continue
+            if tool == "claude" and claude_protection(path, open_ids, None):
+                print(f"  {path.name[:14]}... {_('conversación abierta; se omite')}")
                 continue
             cut, ok, error = rewrite_session_without_images(path, tool, trash)
             if error:
@@ -2977,10 +3260,21 @@ def open_listed(items, choice, reveal=False):
 def apply(args):
     manifest = []
     dest = None
+    only = args.only
+    extras = set()
+    if only in EXTRA_KINDS:
+        extras.add(only)
+    elif only is None and getattr(args, "extras", False):
+        extras.update(EXTRA_KINDS)
+    min_age = getattr(args, "older_than", DEFAULT_MIN_AGE_DAYS)
+    recent = getattr(args, "recent_minutes", CLAUDE_RECENT_MINUTES)
+    # El plan de Claude se arma antes del respaldo para respaldar solo eso.
+    plan = claude_plan(recent) if only in (None, "claude") else None
     if args.backup_dir:
         try:
             include_media = getattr(args, "include_media", False) or args.only == "media"
-            dest = backup(args.backup_dir, include_media=include_media)
+            dest = backup(args.backup_dir, include_media=include_media, only=only,
+                          claude=plan, extras=extras, min_age_days=min_age)
         except (OSError, ValueError, sqlite3.Error) as exc:
             print(f"  REFUSED: el respaldo falló; no se aplicó ningún cambio: {exc}")
             return 4
@@ -2993,12 +3287,6 @@ def apply(args):
     print(f" {_('Aplicando reducciones')}")
     print("=" * 72)
     freed = 0
-    only = args.only
-    extras = set()
-    if only in EXTRA_KINDS:
-        extras.add(only)
-    elif only is None and getattr(args, "extras", False):
-        extras.update(EXTRA_KINDS)
     if extras:
         trash = None
         if getattr(args, "trash", False):
@@ -3008,11 +3296,11 @@ def apply(args):
                 return 4
             trash.mkdir(parents=True, exist_ok=True)
             print(f"  Lo que se quite va a la Papelera: {trash}")
-        f, e = apply_extras(extras, getattr(args, "older_than", DEFAULT_MIN_AGE_DAYS), trash)
+        f, e = apply_extras(extras, min_age, trash)
         freed += f
         manifest += e
     if only in (None, "claude"):
-        f, e = apply_claude()
+        f, e = apply_claude(recent, plan=plan)
         freed += f
         manifest += e
     if only in (None, "codex"):
@@ -3057,7 +3345,8 @@ def apply(args):
 def restore(backup_dir):
     print(f"{_('Restauración manual desde:')} {backup_dir}")
     print(f"{_('Copia los directorios según lo que quieras recuperar:')}")
-    print("  claude-projects/  -> ~/.claude/projects")
+    print("  claude-projects/  -> ~/.claude/projects (solo las conversaciones que se tocaron)")
+    print("  extras/           -> ~/ (misma ruta bajo tu carpeta personal)")
     print("  codex-sessions/   -> ~/.codex/sessions")
     print("  codex-archived/   -> ~/.codex/archived_sessions")
     print("  codex-cache/      -> ~/.codex/cache")
@@ -3109,8 +3398,12 @@ def main(argv=None):
     ap.add_argument("--older-than", type=int, default=DEFAULT_MIN_AGE_DAYS, metavar="DÍAS",
                     help=f"extras: solo lo que no cambió en DÍAS (por defecto {DEFAULT_MIN_AGE_DAYS})")
     ap.add_argument("--trash", action="store_true",
-                    help="extras: mandar a la Papelera en vez de borrar (y guardar ahí "
-                         "el original de cada conversación que se limpia)")
+                    help="solo para los extras: mandar a la Papelera en vez de borrar (y "
+                         "guardar ahí el original de cada conversación que se limpia). "
+                         "El resto de apply se respalda con --backup-dir")
+    ap.add_argument("--recent-minutes", type=int, default=CLAUDE_RECENT_MINUTES, metavar="MIN",
+                    help="Claude Code: no tocar las conversaciones que cambiaron en los últimos "
+                         f"MIN minutos, además de las abiertas (por defecto {CLAUDE_RECENT_MINUTES}; 0 = solo las abiertas)")
     ap.add_argument("--lang", default=None, choices=["es", "en"],
                     help="idioma de salida (por defecto: $LANG, español si no se detecta)")
     args = ap.parse_args(argv)
@@ -3120,6 +3413,8 @@ def main(argv=None):
 
     if args.older_than < 1:
         ap.error("--older-than debe ser 1 o más")
+    if args.recent_minutes < 0:
+        ap.error("--recent-minutes no puede ser negativo")
     if args.mode == "scan":
         scan()
         if args.extras:

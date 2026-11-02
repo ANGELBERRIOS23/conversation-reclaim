@@ -88,7 +88,8 @@ packages, updater metadata and signatures, then attaches them to its release.
 ```bash
 python3 reclaim.py scan                    # read-only estimate
 python3 reclaim.py apply                   # apply; writes a change manifest to ~/.conversation-reclaim/
-python3 reclaim.py apply --backup-dir /Volumes/DISCO/respaldos-ia   # optional full backup first
+python3 reclaim.py apply --backup-dir /Volumes/DISCO/respaldos-ia   # optional backup of what will change
+python3 reclaim.py apply --only claude --recent-minutes 0   # Claude: protect only open chats, not recently changed ones
 python3 reclaim.py apply --only antigravity   # one tool only
 python3 reclaim.py apply --only media         # only old temporary image attachments (optional)
 python3 reclaim.py apply --include-media      # include old temporary attachments in a full cleanup
@@ -175,6 +176,19 @@ Two more differences with OpenCode 2:
 
 ## Safety
 
+- **Open Claude Code conversations.** Claude Code opens its `.jsonl`, appends a
+  line and closes it, so `lsof` cannot see that a conversation is still open.
+  These are never trimmed, and their subagents and images are left alone:
+  - conversations of live processes, from `~/.claude/sessions/<pid>.json`;
+  - conversations named by `--resume`/`--session-id` on a running process;
+  - conversations changed in the last 60 minutes (`--recent-minutes`; `0`
+    turns this off).
+  `scan` lists which ones are open. The desktop app follows the same rule.
+- **Backups cover only what will change.** With `--backup-dir`:
+  - `--only claude` copies only the conversations about to be trimmed and the
+    subagents about to be deleted;
+  - Codex rollouts are copied only when images are being removed.
+  `--trash` applies to the extras only.
 - **Backup optional but recommended.** `apply` without `--backup-dir` never
   copies data anywhere; instead it writes a change manifest to
   `~/.conversation-reclaim/` and uses atomic file replacements (an interrupted
