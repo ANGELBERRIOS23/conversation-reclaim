@@ -9,7 +9,8 @@ permissions:
 
 jobs:
   unittest:
-    runs-on: ubuntu-latest
+    # ubuntu-latest ya es 26.04 y setup-python no trae 3.8 para ella; 24.04 sí.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
