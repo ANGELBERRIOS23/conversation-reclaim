@@ -407,6 +407,8 @@ impl Harness for ConversationImages {
                 Err(error) => warnings.push(format!("{}: {}", path.display(), error)),
             }
         }
+        // Solo llegan conversaciones viejas, pero una puede seguir abierta.
+        crate::engine::retain_unprotected_claude(actions, home, "images", false, warnings);
     }
 }
 

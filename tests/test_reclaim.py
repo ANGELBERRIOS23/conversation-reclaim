@@ -1077,5 +1077,169 @@ def closing_db(path):
     return _closing(con)
 
 
+
+class OpenClaudeConversationTests(unittest.TestCase):
+    OPEN = "11111111-2222-4333-8444-555555555555"
+    CLOSED = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.root = Path(self.td.name)
+        self.projects = self.root / "projects"
+        self.project = self.projects / "proj"
+        self.project.mkdir(parents=True)
+        self.sessions = self.root / "sessions"
+        self.sessions.mkdir()
+        self.paths = dict(reclaim.PATHS)
+        self.paths.update(claude_projects=self.projects, claude_sessions=self.sessions)
+        self.old = time.time() - 3 * 3600
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def compacted(self, session):
+        path = self.project / f"{session}.jsonl"
+        write_jsonl(path, [
+            {"type": "user", "payload": "old " * 50},
+            {"type": "summary", "summary": "kept"},
+            {"type": "user", "payload": "recent"},
+        ])
+        os.utime(path, (self.old, self.old))
+        return path
+
+    def subagent(self, session, agent="x"):
+        path = self.project / session / "subagents" / f"agent-{agent}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_jsonl(path, [{"isSidechain": True, "agentId": agent, "sessionId": session}])
+        os.utime(path, (self.old, self.old))
+        return path
+
+    def mark_open(self, session, pid=None):
+        pid = os.getpid() if pid is None else pid
+        (self.sessions / f"{pid}.json").write_text(
+            json.dumps({"pid": pid, "sessionId": session}))
+
+    def run_apply_claude(self, recent_minutes=reclaim.CLAUDE_RECENT_MINUTES, ps_output=""):
+        ps = mock.Mock(returncode=0, stdout=ps_output)
+        with mock.patch.object(reclaim, "PATHS", self.paths), \
+             mock.patch.object(reclaim, "database_in_use", return_value=False), \
+             mock.patch.object(reclaim.subprocess, "run", return_value=ps), \
+             redirect_stdout(io.StringIO()) as out:
+            freed, entries = reclaim.apply_claude(recent_minutes)
+        return freed, entries, out.getvalue()
+
+    def test_session_file_of_live_process_is_left_untouched(self):
+        open_path = self.compacted(self.OPEN)
+        closed_path = self.compacted(self.CLOSED)
+        open_sub = self.subagent(self.OPEN)
+        closed_sub = self.subagent(self.CLOSED)
+        before = open_path.read_bytes()
+        self.mark_open(self.OPEN)
+        _freed, entries, out = self.run_apply_claude()
+        self.assertEqual(open_path.read_bytes(), before)
+        self.assertTrue(open_sub.exists())
+        self.assertFalse(closed_sub.exists())
+        self.assertEqual(json.loads(closed_path.read_text().splitlines()[0])["type"], "summary")
+        touched = {Path(e["file"]).name for e in entries}
+        self.assertNotIn(open_path.name, touched)
+        self.assertIn(closed_path.name, touched)
+        self.assertIn(self.OPEN[:8], out)
+
+    def test_dead_process_does_not_protect(self):
+        path = self.compacted(self.OPEN)
+        self.mark_open(self.OPEN, pid=999_999)
+        with mock.patch.object(reclaim, "pid_alive", return_value=False):
+            _freed, entries, _out = self.run_apply_claude()
+        self.assertEqual([Path(e["file"]).name for e in entries], [path.name])
+
+    @unittest.skipIf(os.name == "nt", "ps solo existe fuera de Windows")
+    def test_resume_argument_protects_without_session_file(self):
+        path = self.compacted(self.OPEN)
+        before = path.read_bytes()
+        _freed, entries, _out = self.run_apply_claude(
+            ps_output=f"/usr/bin/claude --model x --resume {self.OPEN}\n")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(entries, [])
+
+    def test_recent_change_protects_and_zero_minutes_turns_it_off(self):
+        path = self.compacted(self.CLOSED)
+        os.utime(path, None)  # recién escrito
+        before = path.read_bytes()
+        _freed, entries, _out = self.run_apply_claude(recent_minutes=60)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(entries, [])
+        _freed, entries, _out = self.run_apply_claude(recent_minutes=0)
+        self.assertEqual([Path(e["file"]).name for e in entries], [path.name])
+
+    def test_subagent_of_recently_active_session_is_kept(self):
+        owner = self.compacted(self.OPEN)
+        os.utime(owner, None)
+        sub = self.subagent(self.OPEN)
+        self.run_apply_claude(recent_minutes=60)
+        self.assertTrue(sub.exists())
+
+    def test_backup_only_claude_copies_just_what_changes(self):
+        trimmed = self.compacted(self.CLOSED)
+        untouched = self.project / "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl"
+        write_jsonl(untouched, [{"type": "user", "payload": "sin marcador"}])
+        open_path = self.compacted(self.OPEN)
+        self.mark_open(self.OPEN)
+        codex = self.root / "codex-sessions"
+        codex.mkdir()
+        (codex / "rollout.jsonl").write_text("{}\n")
+        self.paths.update(codex_sessions=codex, codex_archived=self.root / "none",
+                          codex_cache=self.root / "none-cache", codex_logs=[],
+                          codex_state=self.root / "none-state.sqlite",
+                          opencode_db=self.root / "none.db",
+                          opencode_dir=self.root / "none-opencode",
+                          commandcode=self.root / "none-cc", gemini=self.root / "none-gem")
+        args = argparse.Namespace(backup_dir=str(self.root / "backups"), only="claude",
+                                  no_antigravity_steps=False, recent_minutes=0)
+        ps = mock.Mock(returncode=0, stdout="")
+        with mock.patch.object(reclaim, "PATHS", self.paths), \
+             mock.patch.object(reclaim, "database_in_use", return_value=False), \
+             mock.patch.object(reclaim.subprocess, "run", return_value=ps), \
+             mock.patch.object(reclaim, "MANIFEST_DIR", self.root / "manifests"), \
+             redirect_stdout(io.StringIO()):
+            self.assertEqual(reclaim.apply(args), 0)
+        dest = next((self.root / "backups").iterdir())
+        copied = sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file())
+        self.assertEqual(copied, [f"claude-projects/proj/{trimmed.name}"])
+        self.assertIn(b"old", (dest / "claude-projects" / "proj" / trimmed.name).read_bytes())
+        self.assertFalse((dest / "codex-sessions").exists())
+        self.assertIn(b"old", open_path.read_bytes())
+
+    def test_default_backup_skips_codex_rollouts_unless_images_run(self):
+        codex = self.root / "codex-sessions"
+        codex.mkdir()
+        (codex / "rollout.jsonl").write_text("{}\n")
+        self.paths.update(codex_sessions=codex, codex_archived=self.root / "none",
+                          codex_cache=self.root / "none-cache", codex_logs=[],
+                          codex_state=self.root / "none-state.sqlite",
+                          opencode_db=self.root / "none.db",
+                          opencode_dir=self.root / "none-opencode",
+                          commandcode=self.root / "none-cc", gemini=self.root / "none-gem")
+        with mock.patch.object(reclaim, "PATHS", self.paths), \
+             mock.patch.object(reclaim, "_codex_history_dbs", return_value=[]), \
+             mock.patch.object(reclaim, "extras_targets", return_value=[]), \
+             redirect_stdout(io.StringIO()):
+            plain = reclaim.backup(self.root / "b1", only=None)
+            with_images = reclaim.backup(self.root / "b2", only=None, extras={"images"})
+        self.assertFalse((plain / "codex-sessions").exists())
+        self.assertTrue((with_images / "codex-sessions" / "rollout.jsonl").exists())
+
+    def test_open_claude_session_keeps_its_images(self):
+        path = self.compacted(self.OPEN)
+        self.mark_open(self.OPEN)
+        with mock.patch.object(reclaim, "PATHS", self.paths), \
+             mock.patch.object(reclaim, "conversation_image_candidates",
+                               return_value=[("claude", path)]), \
+             mock.patch.object(reclaim, "open_files", return_value=set()), \
+             mock.patch.object(reclaim, "rewrite_session_without_images") as rewrite, \
+             redirect_stdout(io.StringIO()):
+            reclaim.apply_extras({"images"}, 14)
+        rewrite.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

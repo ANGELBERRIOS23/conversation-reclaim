@@ -1,5 +1,8 @@
 use super::{Harness, HarnessMetadata};
-use crate::engine::{add_trim_actions, claude_sidechain_valid, collect_files, file_size, Action};
+use crate::engine::{
+    add_trim_actions, claude_sidechain_valid, collect_files, file_size, retain_unprotected_claude,
+    Action,
+};
 use serde_json::Value;
 use std::path::Path;
 
@@ -45,7 +48,7 @@ impl Harness for Claude {
         vec![home.join(".claude")]
     }
 
-    fn plan(&self, home: &Path, actions: &mut Vec<Action>, _warnings: &mut Vec<String>) {
+    fn plan(&self, home: &Path, actions: &mut Vec<Action>, warnings: &mut Vec<String>) {
         let root = home.join(".claude/projects");
         add_trim_actions(actions, &root, "claude", marker, false);
         for path in collect_files(&root) {
@@ -60,5 +63,6 @@ impl Harness for Claude {
                 ));
             }
         }
+        retain_unprotected_claude(actions, home, "claude", true, warnings);
     }
 }

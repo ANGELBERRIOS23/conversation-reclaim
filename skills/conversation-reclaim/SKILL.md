@@ -42,7 +42,8 @@ CLI Python sin dependencias externas.
 | `python3 reclaim.py scan` | Escaneo de solo lectura. Ejecutar primero. |
 | `python3 reclaim.py skills` | Lista skills y duplicados; nunca los elimina. |
 | `python3 reclaim.py apply` | Limpia y escribe manifiesto sin respaldo externo. |
-| `python3 reclaim.py apply --backup-dir <ruta>` | Respalda todos los targets antes de limpiar. |
+| `python3 reclaim.py apply --backup-dir <ruta>` | Respalda lo que se va a tocar antes de limpiar (con `--only claude`, solo esas conversaciones). |
+| `python3 reclaim.py apply --only claude --recent-minutes 0` | Protege solo las conversaciones abiertas, no las que cambiaron hace poco. |
 | `python3 reclaim.py apply --only claude\|codex\|opencode\|antigravity\|caches\|media` | Limita la limpieza. |
 | `python3 reclaim.py apply --include-media` | Incluye adjuntos temporales antiguos; desactivado por defecto. |
 | `python3 reclaim.py apply --no-antigravity-steps` | Omite la poda de DB de Antigravity. |
@@ -55,6 +56,11 @@ CLI Python sin dependencias externas.
 
 ## Comportamiento por herramienta
 
+- **Claude Code abierto:** lsof no ve una conversación abierta (Claude escribe
+  y cierra el `.jsonl`). El CLI y la app omiten las de procesos vivos
+  (`~/.claude/sessions/<pid>.json` y `--resume`/`--session-id`) y las que
+  cambiaron en los últimos 60 minutos (`--recent-minutes`, `0` lo apaga). No
+  envolver `reclaim.py` para protegerlas: ya lo hace.
 - **Claude Code:** validar marcadores JSON estructuralmente, conservar resumen y
   contenido reciente. Detectar sidechains con `isSidechain`, `agentId` y
   `sessionId`; borrar los cerrados, incluidos `agent-acompact-*`. No tocar
